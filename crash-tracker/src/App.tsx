@@ -1,49 +1,77 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Round } from './types';
-import { generateMultiplier, formatTime, computeStats, computePrediction, generateInitialRounds } from './utils';
+import { computeStats, computePrediction } from './utils';
 import HistoryChart from './components/HistoryChart';
 import RoundTable from './components/RoundTable';
 import PredictionCard from './components/PredictionCard';
 import StatsPanel from './components/StatsPanel';
 import './index.css';
 
+type WsStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
+
+interface ApiResponse {
+  status: WsStatus;
+  error: string | null;
+  rounds: Round[];
+  current: Round | null;
+  total: number;
+}
+
 export default function App() {
-  const [rounds, setRounds] = useState<Round[]>(() => generateInitialRounds());
-  const [isLive, setIsLive] = useState(true);
-  const [isAdding, setIsAdding] = useState(false);
-  const roundIdRef = useRef(1078);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [rounds, setRounds] = useState<Round[]>([]);
+  const [wsStatus, setWsStatus] = useState<WsStatus>('connecting');
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<string>('');
+  const [newRoundId, setNewRoundId] = useState<number | null>(null);
+  const prevRoundCount = useRef(0);
 
   const stats = computeStats(rounds);
   const prediction = computePrediction(rounds);
 
-  function addNewRound() {
-    const newRound: Round = {
-      id: roundIdRef.current++,
-      time: formatTime(new Date()),
-      multiplier: generateMultiplier(),
-      source: 'LIVE',
-    };
-    setRounds(prev => [...prev.slice(-99), newRound]);
-    setIsAdding(true);
-    setTimeout(() => setIsAdding(false), 500);
+  async function fetchRounds() {
+    try {
+      const res = await fetch('/api/luckyjet');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ApiResponse = await res.json();
+      setWsStatus(data.status);
+      setApiError(data.error);
+      if (data.rounds && data.rounds.length > 0) {
+        if (data.rounds.length > prevRoundCount.current) {
+          setNewRoundId(data.rounds[0].id);
+          setTimeout(() => setNewRoundId(null), 2000);
+        }
+        prevRoundCount.current = data.rounds.length;
+        setRounds(data.rounds);
+        setLastUpdate(new Date().toTimeString().slice(0, 8));
+      }
+    } catch (e) {
+      setApiError(e instanceof Error ? e.message : 'Erreur inconnue');
+      setWsStatus('error');
+    }
   }
 
   useEffect(() => {
-    if (isLive) {
-      intervalRef.current = setInterval(() => {
-        addNewRound();
-      }, 5000);
-    } else {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [isLive]);
+    fetchRounds();
+    const interval = setInterval(fetchRounds, 3000);
+    return () => clearInterval(interval);
+  }, []);
 
-  function handleRefreshPrediction() {
-    addNewRound();
+  function getStatusColor(): string {
+    switch (wsStatus) {
+      case 'connected': return '#4ade80';
+      case 'connecting': return '#f5c842';
+      case 'error': return '#e07030';
+      default: return '#7888aa';
+    }
+  }
+
+  function getStatusLabel(): string {
+    switch (wsStatus) {
+      case 'connected': return 'LIVE';
+      case 'connecting': return 'CONNEXION...';
+      case 'error': return 'ERREUR';
+      default: return 'HORS LIGNE';
+    }
   }
 
   return (
@@ -54,6 +82,7 @@ export default function App() {
       maxWidth: '520px',
       margin: '0 auto',
     }}>
+      {/* Header */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -75,40 +104,60 @@ export default function App() {
             🚀
           </div>
           <div>
-            <div style={{ fontWeight: 800, fontSize: '16px', color: '#e2e8f0' }}>CrashTracker</div>
+            <div style={{ fontWeight: 800, fontSize: '16px', color: '#e2e8f0' }}>Lucky Jet Tracker</div>
             <div style={{ fontSize: '11px', color: '#7888aa', letterSpacing: '1px' }}>ANALYSE EN TEMPS RÉEL</div>
           </div>
         </div>
 
-        <button
-          onClick={() => setIsLive(v => !v)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            background: isLive ? '#1a2a1a' : '#2a1a1a',
-            border: `1.5px solid ${isLive ? '#22c55e' : '#e07030'}`,
-            color: isLive ? '#4ade80' : '#e07030',
-            borderRadius: '20px',
-            padding: '6px 16px',
-            fontSize: '12px',
-            fontWeight: 700,
-            letterSpacing: '1px',
-            cursor: 'pointer',
-          }}
-        >
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          background: wsStatus === 'connected' ? '#1a2a1a' : '#1e1a14',
+          border: `1.5px solid ${getStatusColor()}`,
+          color: getStatusColor(),
+          borderRadius: '20px',
+          padding: '6px 14px',
+          fontSize: '12px',
+          fontWeight: 700,
+          letterSpacing: '1px',
+        }}>
           <span style={{
             width: '8px',
             height: '8px',
             borderRadius: '50%',
-            background: isLive ? '#4ade80' : '#e07030',
-            animation: isLive ? 'pulse 1.5s infinite' : 'none',
+            background: getStatusColor(),
+            animation: wsStatus === 'connected' ? 'pulse 1.5s infinite' : 'none',
+            flexShrink: 0,
           }} />
-          {isLive ? 'LIVE' : 'PAUSE'}
-        </button>
+          {getStatusLabel()}
+        </div>
       </div>
 
-      {isAdding && (
+      {/* Erreur de connexion */}
+      {apiError && wsStatus === 'error' && (
+        <div style={{
+          background: '#1e1214',
+          border: '1px solid #e07030',
+          borderRadius: '12px',
+          padding: '12px 16px',
+          marginBottom: '16px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '10px',
+        }}>
+          <span style={{ fontSize: '16px', flexShrink: 0 }}>⚠️</span>
+          <div>
+            <div style={{ color: '#f87171', fontSize: '13px', fontWeight: 700, marginBottom: '2px' }}>
+              Connexion au serveur de jeu impossible
+            </div>
+            <div style={{ color: '#9aa5be', fontSize: '12px' }}>{apiError}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Notification nouveau tour */}
+      {newRoundId && (
         <div style={{
           background: 'linear-gradient(135deg, #1a2535, #1e2d20)',
           border: '1px solid #22c55e',
@@ -122,25 +171,48 @@ export default function App() {
         }}>
           <span style={{ fontSize: '16px' }}>✅</span>
           <span style={{ color: '#4ade80', fontSize: '14px', fontWeight: 600 }}>
-            Nouveau tour #{roundIdRef.current - 1} ajouté !
+            Nouveau tour #{newRoundId} reçu depuis le serveur !
           </span>
         </div>
       )}
 
-      <PredictionCard prediction={prediction} onRefresh={handleRefreshPrediction} />
-      <StatsPanel stats={stats} />
-      <HistoryChart rounds={rounds} />
-      <RoundTable rounds={rounds} />
+      {/* Chargement initial */}
+      {rounds.length === 0 && wsStatus === 'connecting' && (
+        <div style={{
+          textAlign: 'center',
+          padding: '60px 20px',
+          color: '#7888aa',
+        }}>
+          <div style={{ fontSize: '40px', marginBottom: '16px' }}>🔄</div>
+          <div style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px', color: '#9aa5be' }}>
+            Connexion au serveur Lucky Jet...
+          </div>
+          <div style={{ fontSize: '13px' }}>
+            Récupération des données en cours
+          </div>
+        </div>
+      )}
 
-      <div style={{
-        textAlign: 'center',
-        color: '#3a4560',
-        fontSize: '12px',
-        paddingTop: '8px',
-        paddingBottom: '20px',
-      }}>
-        Mise à jour automatique toutes les 5 secondes · Simulation uniquement
-      </div>
+      {rounds.length > 0 && (
+        <>
+          <PredictionCard prediction={prediction} onRefresh={fetchRounds} />
+          <StatsPanel stats={stats} />
+          <HistoryChart rounds={[...rounds].reverse()} />
+          <RoundTable rounds={rounds} />
+        </>
+      )}
+
+      {lastUpdate && (
+        <div style={{
+          textAlign: 'center',
+          color: '#3a4560',
+          fontSize: '12px',
+          paddingTop: '8px',
+          paddingBottom: '20px',
+        }}>
+          Dernière mise à jour : {lastUpdate} · Actualisation toutes les 3s
+        </div>
+      )}
 
       <style>{`
         @keyframes pulse {
