@@ -1,8 +1,10 @@
 export interface Round {
   id: number;
+  roundId?: string;
   time: string;
   multiplier: number;
   source: 'LIVE' | 'HISTORIQUE';
+  timestamp: number;
 }
 
 export interface Stats {

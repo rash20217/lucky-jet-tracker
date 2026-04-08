@@ -1,0 +1,181 @@
+ajouter un bouton de prédiction qui analysera l’historique réalisé ont pourra utiliser le bouton chaque 5 minutes qui nous donnera Heure d’entrée | Timer | Cible | Niveau de signal 
+
+
+Pour analyser les donner réaliste
+
+voici  les règles
+
+## 1. 📊 LECTURE DU CYCLE (CHAUD / FROID / TRANSITION)
+
+| Phase | Critères |
+
+| **Très chaud** | ≥ 3 pics > 100x en moins de 2h OU un pic > 500x |
+
+| **Chaud** | 2 cotes > 5x en < 3 min OU accumulation < 2 min + 1.00x |
+
+| **Transition** | Dernier hit > 10x depuis 3–5 min, pas encore de nouveau signal |
+
+| **Froid** | Aucune cote > 5x depuis > 5 min, ni 1.00x récent |
+
+| **Froid extrême** | > 15 cotes < 3x sans 1.00x |
+
+## 2. 🔎 SIGNALS PRÉ-HIT pour jouer une cote (≥ 10X)
+
+### A. Accumulations
+
+| Durée | Condition | Signal | Action | Timer |
+
+| < 2 min | – | 🔴 Très fort | Split prioritaire | 1m03s |
+
+| < 2 min | + 1.00x | 🔴 Maximum | Split prioritaire | 1m03s |
+
+| 2–3 min | – | 🟡 Modéré | Split prudent | 1m03s |
+
+| 2–3 min | + 1.00x | 🟠 Fort | Split | 1m03s |
+
+| 3–4 min | ≥ 1 x 1.00x | 🟠 Faible | Split possible | 1m03s |
+
+| 3–4 min | 0 x 1.00x | ⚪ Très faible | Ne pas split | – |
+
+| > 4 min | – | 🟠 Faible | Split possible | 1m03s |
+
+| > 4 min | ≥ 2 x 1.00x | 🔴 Fort | Split prioritaire | 1m03s |
+
+### B. Réveil simple (après phase froide)
+
+| Signal | Délai avant hit | Action | Timer |
+
+|--------|----------------|--------|-------|
+
+| 1 cote > 5x | 45–60s | Split | 1m03s |
+
+| 1 cote > 5x + 1.00x dans 30s | 30–50s | Split prioritaire | 1m03s |
+
+### C. Réveil + double cote > 5x
+
+| Signal | Délai avant hit | Action |
+
+| 2 cotes > 5x en < 3 min + 1.00x | 30–90s | Split prioritaire |
+
+D. Hit moyen → petite cote → très gros hit
+
+| Signal | Action |
+
+|--------|--------|
+
+| Hit 10–15x → cote < 2x dans les 30s | Préparer second split pour 50x+ (timer 2m20s ou 4m45s) |
+
+## 3. 🎯 STRATÉGIE TRÈS GROS MULTIPLICATEURS (> 500X)
+
+### Conditions préalables (DOIT avoir avant de jouer ou chercher la cote)
+
+- ✅ Deux pics > 100x dans les **2 heures précédentes**
+
+- ✅ Un retracement sous **2.00x** dans les 5 min suivant un pic > 150x
+
+- ✅ Les 3 derniers pics > 50x ont une **terminaison propre** (.00 .20 .35 .50 .65 .80)
+
+### Conditions bloquantes (NE PAS jouer )
+
+- ❌ Dernier pic > 300x datant de **moins de 15 minutes**
+
+- ❌ Terminaison des 3 derniers pics > 50x en **.49 / .51 / .73 / .88**
+
+- ❌ Aucun pic > 100x depuis plus de **2 heures**
+
+
+## 4. ⏱️ TIMERS PRÉCIS (à la seconde)
+
+| Cible | Timer |
+
+| 2x (sécurisé) | 11,45 secondes |
+
+| 5x | ~27 secondes |
+
+| 10x | 1 minute 03 secondes |
+
+| 20x | ~1 minute 30 secondes |
+
+| 50x | ~2 minutes 20 secondes |
+
+| 100x+ | ~4 minutes 45 secondes |
+
+## 5. 🧠 GESTION DES MISES (SPLITS)
+
+### Pour viser ≥ 10x
+
+| Part | % | Timer | Cible |
+
+| Sécurisée | 50% | 11,45s | 2x |
+
+| Offensive | 50% | 1m03s | 10x+ |
+
+### Pour viser ≥ 500x
+
+| Part | % | Timer | Cible |
+
+| Sécurisée | 70% | 11,45s | 2x |
+
+| Offensive | 20% | 2m20s | 50x |
+
+| Très offensive | 10% | 4m45s | 100x+ |
+
+### Progression après échec
+
+- 3 échecs consécutifs à 2x → mise ×1,5 (palier)
+
+- 2 échecs consécutifs à 10x+ → retour au 2x sécurisé pendant 10 min
+
+## 6. 🛡️ RÈGLES ANTI-PIÈGES (TOUS NIVEAUX)
+
+| Piège | Règle |
+
+| Rebond trompeur | Exiger 3 closes consécutives > niveau de rebond |
+
+| Signal isolé | Attendre 3 closes > 50% du pic |
+
+| Liquidité fantôme | Ignorer si > 5 oscillations > 100% en 10 tours |
+
+| Terminaison aléatoire | Filtrer .00/.20/.35/.50/.65/.80 |
+
+| Latence post-hit | >10x : 3–5 min ; >30x : 5–10 min ; >100x : 15–20 min |
+
+| Double pic < 15 min | Ne pas trader un nouveau >300x immédiatement |
+
+## 7. 📈 LEÇONS CLÉS DE L’HISTORIQUE
+
+| Leçon | Application |
+
+| Les très gros hits (>1000x) surviennent toujours en grappe | Ne jamais trader isolément |
+
+Une respiration (pic >150x → <2x) précède souvent un >500x | Split long dans les 45 min |
+
+| Un 1.00x en accumulation courte donne 75% de ≥10x | Split prioritaire |
+
+| Une accumulation >4 min sans 1.00x peut donner un hit modéré | Split possible mais prudent |
+
+| La latence après >500x est souvent sous-estimée (15–20 min mini) | Ne pas jouer immédiatement |
+
+## 8. 📋 CHECKLIST SESSION EN DIRECT
+
+- [ ] Identifier la phase (chaud / froid / transition)
+
+- [ ] Repérer 1.00x ou accumulation courte
+
+- [ ] Vérifier les terminaisons des 3 derniers pics >50x
+
+- [ ] Appliquer le split adapté (≥10x ou ≥500x)
+
+- [ ] Respecter la latence post-hit
+
+- [ ] Noter les heures de pic pour affiner les fenêtres
+
+## ✅ CONCLUSION – RÈGLE D’OR
+
+> **En phase froide** → 2x sécurisé (11,45s)  
+
+> **Accumulation < 2 min + 1.00x** → split 1m03s (10x+)  
+
+> **Réveil simple (>5x)** → split 1m03s  
+
+> **Grappe >100x + respiration** → split long 2m20s / 4m45s (>500x)
