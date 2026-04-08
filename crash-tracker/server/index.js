@@ -26,6 +26,142 @@ let reconnectTimer = null;
 let pingTimer = null;
 let roundCounter = 1000;
 
+// ── Prediction Scheduler ──────────────────────────────────────────────────────
+const predictions = [];          // last 50 predictions
+const MAX_PREDICTIONS = 50;
+const PRED_DELAY_MS   = 3 * 60 * 1000;  // window opens 3 min after generation
+const PRED_WINDOW_MS  = 2 * 60 * 1000;  // window lasts 2 min (T+3 → T+5)
+
+function analyzeForPrediction() {
+  if (history.length < 3) return null;
+
+  const now = Date.now();
+  const sorted = [...history].sort((a, b) => b.timestamp - a.timestamp);
+
+  // Accumulation since last >5x
+  const lastBig5  = sorted.find(r => r.multiplier >= 5);
+  const lastBig10 = sorted.find(r => r.multiplier >= 10);
+  const lastBig50 = sorted.find(r => r.multiplier >= 50);
+  const accStartTs = lastBig5 ? lastBig5.timestamp : (sorted[sorted.length - 1]?.timestamp ?? now);
+  const accDurMin  = (now - accStartTs) / 60000;
+  const accRounds  = sorted.filter(r => r.timestamp > accStartTs);
+  const onesInAcc  = accRounds.filter(r => r.multiplier <= 1.01).length;
+
+  // Recent stats
+  const last10 = sorted.slice(0, 10);
+  const avg10  = last10.reduce((s, r) => s + r.multiplier, 0) / (last10.length || 1);
+  const last1h = sorted.filter(r => (now - r.timestamp) < 3600000);
+  const freq10x = last1h.filter(r => r.multiplier >= 10).length;
+  const freq50x = last1h.filter(r => r.multiplier >= 50).length;
+
+  // Signal & target determination
+  let target, level, signal, timer, confidence;
+
+  const latencyBlocked = lastBig50 && (now - lastBig50.timestamp) < 32 * 60000;
+
+  if (latencyBlocked) {
+    const remMin = Math.ceil((32 * 60000 - (now - lastBig50.timestamp)) / 60000);
+    target = 2; level = 'PRUDENCE'; signal = 'FAIBLE';
+    timer = '11s45'; confidence = 35;
+    return { target, level, signal, timer, confidence, accDurMin, onesInAcc, avg10, note: `Latence post-${lastBig50.multiplier}x : ${remMin} min restantes` };
+  }
+
+  if (accDurMin < 2 && onesInAcc >= 1) {
+    target = 10; level = 'MAXIMUM'; signal = 'TRÈS FORT'; timer = '1m03s'; confidence = 78;
+  } else if (accDurMin < 2) {
+    target = 10; level = 'FORT'; signal = 'FORT'; timer = '1m03s'; confidence = 65;
+  } else if (accDurMin < 3 && onesInAcc >= 1) {
+    target = 10; level = 'FORT'; signal = 'FORT'; timer = '1m03s'; confidence = 60;
+  } else if (accDurMin < 3) {
+    target = 5; level = 'MODÉRÉ'; signal = 'MODÉRÉ'; timer = '27s'; confidence = 52;
+  } else if (accDurMin >= 4 && onesInAcc >= 2) {
+    target = 10; level = 'FORT'; signal = 'FORT'; timer = '1m03s'; confidence = 63;
+  } else if (freq10x >= 3) {
+    target = 10; level = 'CHAUD'; signal = 'FORT'; timer = '1m03s'; confidence = 58;
+  } else if (freq50x >= 1 && (now - lastBig50.timestamp) > 35 * 60000) {
+    target = 50; level = 'AGRESSIF'; signal = 'FORT'; timer = '2m20s'; confidence = 45;
+  } else {
+    target = 2; level = 'PRUDENCE'; signal = 'FAIBLE'; timer = '11s45'; confidence = 55;
+  }
+
+  return { target, level, signal, timer, confidence, accDurMin, onesInAcc, avg10, note: null };
+}
+
+function generatePrediction() {
+  const now = Date.now();
+  const analysis = analyzeForPrediction();
+  if (!analysis) return;
+
+  const windowStart = now + PRED_DELAY_MS;
+  const windowEnd   = now + PRED_DELAY_MS + PRED_WINDOW_MS;
+
+  const pred = {
+    id: Date.now(),
+    generatedAt: now,
+    generatedAtFmt: formatTime(new Date(now)),
+    windowStart,
+    windowEnd,
+    windowStartFmt: formatTime(new Date(windowStart)),
+    windowEndFmt:   formatTime(new Date(windowEnd)),
+    target:      analysis.target,
+    level:       analysis.level,
+    signal:      analysis.signal,
+    timer:       analysis.timer,
+    confidence:  analysis.confidence,
+    accDurMin:   Math.round(analysis.accDurMin * 10) / 10,
+    onesInAcc:   analysis.onesInAcc,
+    avg10:       Math.round(analysis.avg10 * 100) / 100,
+    note:        analysis.note,
+    status:      'pending',       // pending | success | fail
+    bestMultiplier: null,
+    roundsInWindow: 0,
+    resolvedAt: null,
+  };
+
+  predictions.unshift(pred);
+  if (predictions.length > MAX_PREDICTIONS) predictions.pop();
+  console.log(`[PRED] Prédiction générée — Cible ≥${pred.target}x | Fenêtre ${pred.windowStartFmt}→${pred.windowEndFmt} | Signal ${pred.signal}`);
+}
+
+function validatePredictions(round) {
+  const now = round.timestamp;
+  for (const pred of predictions) {
+    if (pred.status !== 'pending') continue;
+
+    // Round falls inside the prediction window
+    if (now >= pred.windowStart && now <= pred.windowEnd) {
+      pred.roundsInWindow++;
+      if (pred.bestMultiplier === null || round.multiplier > pred.bestMultiplier) {
+        pred.bestMultiplier = round.multiplier;
+      }
+      if (round.multiplier >= pred.target) {
+        pred.status = 'success';
+        pred.resolvedAt = now;
+        console.log(`[PRED] ✅ VALIDÉE — Cible ≥${pred.target}x atteinte avec ${round.multiplier}x`);
+      }
+    }
+
+    // Window has closed — resolve as fail if still pending
+    if (pred.status === 'pending' && now > pred.windowEnd) {
+      pred.status = 'fail';
+      pred.resolvedAt = now;
+      console.log(`[PRED] ❌ ÉCHOUÉE — Cible ≥${pred.target}x non atteinte (meilleur: ${pred.bestMultiplier ?? 0}x)`);
+    }
+  }
+}
+
+function scheduleNextPrediction() {
+  const now = Date.now();
+  const SLOT_MS = 5 * 60 * 1000;
+  const msIntoSlot = now % SLOT_MS;
+  const msUntilNext = SLOT_MS - msIntoSlot;
+  setTimeout(() => {
+    generatePrediction();
+    scheduleNextPrediction(); // chain
+  }, msUntilNext);
+  console.log(`[PRED] Prochaine prédiction dans ${Math.round(msUntilNext / 1000)}s`);
+}
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
 function formatTime(d) { return d.toTimeString().slice(0, 8); }
@@ -146,6 +282,7 @@ function addRound(multiplier) {
   currentCoeff = null;
   currentRoundId = null;
   console.log(`[ROUND] #${round.id} — ${round.multiplier}x`);
+  validatePredictions(round);
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -252,8 +389,36 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, wsStatus, historySize: history.length });
 });
 
+app.get('/api/predictions', (req, res) => {
+  // Auto-close expired pending predictions
+  const now = Date.now();
+  for (const pred of predictions) {
+    if (pred.status === 'pending' && now > pred.windowEnd) {
+      pred.status = 'fail';
+      pred.resolvedAt = now;
+      console.log(`[PRED] ❌ ÉCHOUÉE (expired) — Cible ≥${pred.target}x | meilleur: ${pred.bestMultiplier ?? 0}x`);
+    }
+  }
+
+  const total   = predictions.filter(p => p.status !== 'pending').length;
+  const success = predictions.filter(p => p.status === 'success').length;
+  const fail    = predictions.filter(p => p.status === 'fail').length;
+
+  // Countdown to next slot
+  const SLOT_MS = 5 * 60 * 1000;
+  const msUntilNext = SLOT_MS - (now % SLOT_MS);
+
+  res.json({
+    predictions: predictions.slice(0, 20),
+    score: { total, success, fail, rate: total > 0 ? Math.round((success / total) * 100) : 0 },
+    nextPredictionIn: msUntilNext,
+    nextPredictionAt: new Date(now + msUntilNext).toTimeString().slice(0, 8),
+  });
+});
+
 const PORT = 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[API] Serveur Express lancé sur le port ${PORT}`);
   startConnection();
+  scheduleNextPrediction();
 });

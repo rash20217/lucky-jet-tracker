@@ -7,6 +7,7 @@ import PredictionCard from './components/PredictionCard';
 import StatsPanel from './components/StatsPanel';
 import PredictionSignal from './components/PredictionSignal';
 import DeepAnalysis from './components/DeepAnalysis';
+import PredictorPanel from './components/PredictorPanel';
 import './index.css';
 
 type WsStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
@@ -197,6 +198,7 @@ export default function App() {
 
       {rounds.length > 0 && (
         <>
+          <PredictorPanel />
           <PredictionCard prediction={prediction} onRefresh={fetchRounds} />
           <PredictionSignal rounds={rounds} />
           <DeepAnalysis rounds={rounds} />
