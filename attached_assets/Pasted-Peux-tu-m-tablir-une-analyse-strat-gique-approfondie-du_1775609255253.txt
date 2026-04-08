@@ -1,0 +1,87 @@
+Peux-tu m’établir une analyse stratégique approfondie du jeu Lucky Jet, basée sur les données en temps réel, en suivant cette structure précise :
+
+1. 🔎 Détection des signaux et lecture du cycle actuel
+* Identifier et analyser les séquences récentes : nombre de multiplicateurs inférieurs à 2x, 10x, 30x...
+* Repérer les signes d’un cycle chaud, froid ou stable selon les chronologies récentes des multiplicateurs.
+                * Mettre en évidence les phases critiques (ex. : accumulation de cotes basses < 2x sur 3 minutes, ou absence de +50x depuis plus de 40 minutes).
+
+2. 📊 Prédiction précise des probabilités de prochains multiplicateurs élevés
+* Évaluer la probabilité exacte (en %) d'apparition d'une cote > 50x ou 100x dans les 15, 30 ou 60 prochaines minutes, avec des références précises aux heures, minutes et secondes (ex. : "Prochaine fenêtre critique attendue à 20h48:30").
+
+3. 🧠 Plan d’action complet avec repères temporels précis
+a. 🕒 Fenêtres horaires propices pour les gros multiplicateurs
+* Identifier les plages horaires récurrentes (ex. : entre 18h45:00 et 19h15:00 UTC, apparition fréquente de +50x tous les ~27 minutes).
+* Définir les minuteries exactes à surveiller (ex. : "Après 6 minutes 40 secondes d’un +10x, prochaine cible >30x attendue vers 21h03:40").
+b. 🔁 Lecture du cycle : chaud, froid, ou stable
+* Basé sur l’intervalle moyen entre les cotes élevées (>10x, >50x) et la densité des cotes <2x
+* Exemple :
+    * Cycle chaud : 3 ou plusieurs cotes >10.00x en moins de 7 à 12 minutes, ou apparition d’un +100x
+    * Cycle froid : +25 séquences consécutives <2x ou 0 cotes >20x en 45 minutes
+c. 🚀 Stratégies d’entrée et de retrait selon la situation
+* Déclencher l’entrée exactement entre 11,00 et 11,60 secondes pour viser la cote 2x
+* Pour les cotes 10x ou plus, patienter jusqu’à 01 minute 03 secondes (±2 sec max) si le cycle est favorable
+* Utiliser un timer précis pour chaque décollage afin d’optimiser la sortie
+d. 💰 Gestion optimisée des mises
+* 🔄 Split dynamique : diviser la mise entre sortie à 2x (à 11,45s) et tentative de 10x (à 63s)
+* 📈 Progression par palier : après 3 échecs à 2x, appliquer un palier x1.5
+* 🪂 Stratégie “rebond” : entrer juste après une chute à 1.00 avec un timer programmé sur 5,2 secondes pour sortir à 1.80 minimum
+
+4. 🛡️ Conseils pratiques pour anticiper les phases critiques
+* Surveille les séries consécutives de 1.00 à 1.40x, elles précèdent souvent un 10x ou plus dans les 5 à 9 minutes suivantes
+* Après un 50x ou +, ne pas rejouer immédiatement : fenêtre de latence moyenne de 32 à 38 minutes pour le prochain gros multiplicateur
+* Toujours calibrer le timer à la seconde près :
+    * 2x = 11,45 secondes
+    * 5x = ~27 secondes
+    * 10x = 01 minute 03 secondes
+    * 50x = ~02 minutes 20 secondes
+    * 100x = ~04 minutes 45 secondes
+
+5- Utilisez des **outils de tracking en temps réel** pour maximiser la précision.
+
+
+Règle Anti-Piège** :  
+  > « *Ne jamais trader un pic >50x sans :*  
+  > - *3 tests préalables de 20x+*  
+  > - *Terminaison .00/.50*  
+  > - *Volume 2x la moyenne* 
+
+Piège de la "Liquidité Fantôme"**  
+
+Règle Anti-Piège** :  
+  > « *Ignorer les marchés avec :*  
+  > - *Plus de 5 oscillations >100% en 10 tours*  
+  > - *Absence de paliers psychologiques* »
+
+
+Piège du "Rebond Trompeur
+
+Règle Anti-Piège** :  
+  > « *Exiger 3 closes consécutifs > niveau de rebond*  
+  > *(ex: 5.34 → 5.23 → 5.61 → 5.80)* »  
+
+
+Piège de la "Terminaison Aléatoire"**  
+
+Règle Anti-Piège** :  
+  > « *Filtrer les cotes dont les décimales :*  
+  > - *N’appartiennent pas à [.00, .20, .35, .50, .65, .80]* »  
+
+
+Piège du "Signal Isolé"*
+
+Détection** :  
+  ✅ *RSI >90* sur le pic (surachat extrême)  
+  ✅ *Pas de confirmation* par d’autres indicateurs  
+- **Règle Anti-Piège** :  
+  > « *Attendre 3 closes >50% du pic*  
+  > *(ex: 79.08 → besoin de 3 closes >39.54)* »  
+
+
+1. **Filtre Temporel** :  
+   - Ne trader que les plages *01h-03h* (moins de pièges)  
+2. **Filtre de Volume** :  
+   - Exiger un *volume relatif >1.5*  
+3. **Filtre des Décimaux** :  
+   - Bloquer les cotes sans terminaison stratégique  
+
+Prochain Backtest** : Analyse des *clusters horaires* pour affiner les plages sûres.  

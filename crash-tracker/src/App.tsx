@@ -6,6 +6,7 @@ import RoundTable from './components/RoundTable';
 import PredictionCard from './components/PredictionCard';
 import StatsPanel from './components/StatsPanel';
 import PredictionSignal from './components/PredictionSignal';
+import DeepAnalysis from './components/DeepAnalysis';
 import './index.css';
 
 type WsStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
@@ -198,6 +199,7 @@ export default function App() {
         <>
           <PredictionCard prediction={prediction} onRefresh={fetchRounds} />
           <PredictionSignal rounds={rounds} />
+          <DeepAnalysis rounds={rounds} />
           <StatsPanel stats={stats} />
           <HistoryChart rounds={[...rounds].reverse()} />
           <RoundTable rounds={rounds} />
