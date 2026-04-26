@@ -102,7 +102,6 @@ export function analyzeHistory(rounds: Round[]): AnalysisResult {
   const lastBig500 = sorted.find(r => isBig(r, 500));
   const lastBig300 = sorted.find(r => isBig(r, 300));
   const lastBig100 = sorted.find(r => isBig(r, 100));
-  const lastBig50  = sorted.find(r => isBig(r, 50));
   const lastBig10  = sorted.find(r => isBig(r, 10));
   const lastBig5   = sorted.find(r => isBig(r, 5));
 
@@ -367,7 +366,7 @@ function splitBig500(): SplitPart[] {
 }
 
 function makeBlocage(
-  now: number,
+  _now: number,
   phase: Phase,
   phaseLabel: string,
   details: string[],

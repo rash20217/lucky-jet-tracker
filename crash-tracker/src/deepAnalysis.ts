@@ -3,7 +3,6 @@ import type { Round } from './types';
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const MIN = 60_000;
-const HOUR = 3_600_000;
 
 function minsAgo(ts: number) { return (Date.now() - ts) / MIN; }
 function secsAgo(ts: number) { return (Date.now() - ts) / 1000; }
@@ -15,23 +14,13 @@ function fmtTimeFuture(ts: number): string {
   return new Date(ts).toTimeString().slice(0, 8);
 }
 
-function pct(n: number, d: number): number {
-  if (d === 0) return 0;
-  return Math.round((n / d) * 100);
-}
-
 function termination(m: number): string {
   const dec = Math.round((m % 1) * 100);
   return `.${String(dec).padStart(2, '0')}`;
 }
 
-const CLEAN_TERMS = [0, 20, 35, 50, 65, 80];
-const BAD_TERMS   = [49, 51, 73, 88];
+const BAD_TERMS = [49, 51, 73, 88];
 
-function isClean(m: number): boolean {
-  const dec = Math.round((m % 1) * 100);
-  return CLEAN_TERMS.includes(dec);
-}
 function isBad(m: number): boolean {
   const dec = Math.round((m % 1) * 100);
   return BAD_TERMS.includes(dec);

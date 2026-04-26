@@ -1,6 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import WebSocket from 'ws';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -472,7 +477,16 @@ app.get('/api/predictions', (req, res) => {
   });
 });
 
-const PORT = 3001;
+// Serve built frontend in production
+const distDir = path.join(__dirname, '..', 'dist');
+app.use(express.static(distDir));
+app.get(/^\/(?!api).*/, (req, res) => {
+  res.sendFile(path.join(distDir, 'index.html'), (err) => {
+    if (err) res.status(404).end();
+  });
+});
+
+const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[API] Serveur Express lancé sur le port ${PORT}`);
   if (TG_ENABLED) {

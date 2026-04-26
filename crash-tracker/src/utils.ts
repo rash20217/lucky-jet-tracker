@@ -79,6 +79,7 @@ export function generateInitialRounds(): Round[] {
     rounds.push({
       id: 1077 - i,
       time: formatTime(t),
+      timestamp: t.getTime(),
       multiplier: generateMultiplier(),
       source: 'HISTORIQUE',
     });
