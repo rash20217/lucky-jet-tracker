@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import WebSocket from 'ws';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,29 +21,150 @@ const MAX_HISTORY = 100;
 // Telegram
 const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const TG_ENABLED = !!(TG_TOKEN && TG_CHAT_ID);
+const TG_ENABLED = !!TG_TOKEN;
+const APP_URL    = process.env.APP_URL || 'https://python-1--tvjqjzp7bw.replit.app';
 
-async function sendTelegram(text) {
-  if (!TG_ENABLED) return;
+// Subscriber list (persisted to disk)
+const SUBS_FILE = path.join(__dirname, 'subscribers.json');
+const subscribers = new Map(); // chatId -> { firstName, username, subscribedAt }
+
+function loadSubscribers() {
   try {
-    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TG_CHAT_ID,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      console.error(`[TG] Erreur envoi (${res.status}): ${body}`);
+    if (fs.existsSync(SUBS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8'));
+      for (const s of data) subscribers.set(s.chatId, s);
+      console.log(`[TG] ${subscribers.size} abonné(s) chargé(s) depuis le disque`);
     }
   } catch (e) {
-    console.error(`[TG] Exception envoi:`, e.message);
+    console.error('[TG] Erreur chargement abonnés:', e.message);
   }
+  // Always include the owner chat ID
+  if (TG_CHAT_ID && !subscribers.has(Number(TG_CHAT_ID))) {
+    subscribers.set(Number(TG_CHAT_ID), { chatId: Number(TG_CHAT_ID), firstName: 'Owner', subscribedAt: Date.now() });
+    saveSubscribers();
+  }
+}
+
+function saveSubscribers() {
+  try {
+    fs.writeFileSync(SUBS_FILE, JSON.stringify([...subscribers.values()], null, 2));
+  } catch (e) {
+    console.error('[TG] Erreur sauvegarde abonnés:', e.message);
+  }
+}
+
+async function tgApi(method, body) {
+  if (!TG_TOKEN) return { ok: false };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await res.json();
+  } catch (e) {
+    console.error(`[TG] Exception ${method}:`, e.message);
+    return { ok: false };
+  }
+}
+
+async function sendTelegramTo(chatId, text, extra = {}) {
+  if (!TG_ENABLED) return;
+  const r = await tgApi('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...extra,
+  });
+  if (!r.ok) {
+    console.error(`[TG] Échec envoi à ${chatId}: ${r.description || 'inconnu'}`);
+    // Auto-remove if user blocked the bot
+    if (r.description && (r.description.includes('blocked') || r.description.includes('not found') || r.description.includes('deactivated'))) {
+      subscribers.delete(chatId);
+      saveSubscribers();
+      console.log(`[TG] Abonné ${chatId} retiré (${r.description})`);
+    }
+  }
+}
+
+async function broadcastTelegram(text) {
+  if (!TG_ENABLED || subscribers.size === 0) return;
+  const ids = [...subscribers.keys()];
+  await Promise.all(ids.map(id => sendTelegramTo(id, text)));
+}
+
+// Backwards-compatible alias used elsewhere in the file
+const sendTelegram = broadcastTelegram;
+
+// ── /start command handler + long-polling ─────────────────────────────────────
+let tgUpdateOffset = 0;
+
+async function handleTelegramUpdate(update) {
+  const msg = update.message || update.edited_message;
+  if (!msg || !msg.chat) return;
+  const chatId = msg.chat.id;
+  const text = (msg.text || '').trim();
+
+  if (text === '/start' || text === '/start@' + (msg.via_bot?.username || '')) {
+    const isNew = !subscribers.has(chatId);
+    subscribers.set(chatId, {
+      chatId,
+      firstName: msg.chat.first_name || '',
+      username: msg.chat.username || '',
+      subscribedAt: Date.now(),
+    });
+    saveSubscribers();
+    console.log(`[TG] ${isNew ? 'Nouvel abonné' : 'Abonné existant'}: ${chatId} (@${msg.chat.username || '?'}) — total: ${subscribers.size}`);
+
+    const welcome = isNew
+      ? `🎉 <b>Bienvenue sur Lucky Jet Tracker !</b>\n\n` +
+        `Vous êtes maintenant abonné aux signaux automatiques :\n` +
+        `🚀 Une nouvelle prédiction toutes les 5 minutes\n` +
+        `✅ Résultat ❌ ou ✅ dès la fin de la fenêtre\n\n` +
+        `Touchez le bouton ci-dessous pour ouvrir l'application complète.`
+      : `🚀 <b>Lucky Jet Tracker</b>\n\nVous êtes déjà abonné. Touchez le bouton ci-dessous pour ouvrir l'application.`;
+
+    await sendTelegramTo(chatId, welcome, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '🚀 Ouvrir l\'application', web_app: { url: APP_URL } }]],
+      },
+    });
+
+    // Set the persistent menu button for this user
+    await tgApi('setChatMenuButton', {
+      chat_id: chatId,
+      menu_button: { type: 'web_app', text: '🚀 Lucky Jet', web_app: { url: APP_URL } },
+    });
+  } else if (text === '/stop') {
+    if (subscribers.delete(chatId)) {
+      saveSubscribers();
+      console.log(`[TG] Abonné ${chatId} désinscrit — total: ${subscribers.size}`);
+      await sendTelegramTo(chatId, '👋 Vous ne recevrez plus de prédictions. Tapez /start à tout moment pour vous réabonner.');
+    }
+  } else if (text === '/stats') {
+    await sendTelegramTo(chatId, `📊 <b>Stats du bot</b>\n\nAbonnés actifs : ${subscribers.size}\nTours en historique : ${history.length}\nPrédictions enregistrées : ${predictions.length}`);
+  }
+}
+
+async function pollTelegramUpdates() {
+  if (!TG_TOKEN) return;
+  try {
+    const r = await tgApi('getUpdates', {
+      offset: tgUpdateOffset,
+      timeout: 25,
+      allowed_updates: ['message'],
+    });
+    if (r.ok && Array.isArray(r.result)) {
+      for (const u of r.result) {
+        tgUpdateOffset = u.update_id + 1;
+        try { await handleTelegramUpdate(u); } catch (e) { console.error('[TG] handler error:', e.message); }
+      }
+    }
+  } catch (e) {
+    console.error('[TG] poll error:', e.message);
+  }
+  setImmediate(pollTelegramUpdates);
 }
 
 // State
@@ -490,16 +612,24 @@ const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[API] Serveur Express lancé sur le port ${PORT}`);
   if (TG_ENABLED) {
-    console.log(`[TG] Bot Telegram activé (chat ${TG_CHAT_ID})`);
+    loadSubscribers();
+    console.log(`[TG] Bot Telegram activé — ${subscribers.size} abonné(s)`);
+    pollTelegramUpdates();
+    // Set the bot's command list (autocomplete in Telegram)
+    tgApi('setMyCommands', {
+      commands: [
+        { command: 'start',  description: "S'abonner et ouvrir l'application" },
+        { command: 'stop',   description: 'Se désabonner des prédictions' },
+        { command: 'stats',  description: 'Voir les stats du bot' },
+      ],
+    });
     sendTelegram(
-      `🤖 <b>Lucky Jet Tracker connecté</b>\n\n` +
-      `Le bot enverra automatiquement :\n` +
-      `• Chaque nouvelle prédiction (toutes les 5 min)\n` +
-      `• Les résultats ✅ / ❌\n\n` +
+      `🤖 <b>Lucky Jet Tracker reconnecté</b>\n\n` +
+      `Le bot est prêt à envoyer les prochaines prédictions.\n` +
       `Bonne chance ! 🚀`
     );
   } else {
-    console.log(`[TG] Bot Telegram désactivé (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant)`);
+    console.log(`[TG] Bot Telegram désactivé (TELEGRAM_BOT_TOKEN manquant)`);
   }
   startConnection();
   scheduleNextPrediction();
