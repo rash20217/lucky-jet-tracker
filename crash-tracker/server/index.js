@@ -12,6 +12,34 @@ const GATEWAY_HTTP = 'https://crash-gateway-grm-cr.gamedev-tech.cc';
 const GATEWAY_WS   = 'wss://crash-gateway-grm-cr.gamedev-tech.cc/websocket/lifecycle';
 const MAX_HISTORY = 100;
 
+// Telegram
+const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TG_ENABLED = !!(TG_TOKEN && TG_CHAT_ID);
+
+async function sendTelegram(text) {
+  if (!TG_ENABLED) return;
+  try {
+    const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`[TG] Erreur envoi (${res.status}): ${body}`);
+    }
+  } catch (e) {
+    console.error(`[TG] Exception envoi:`, e.message);
+  }
+}
+
 // State
 const history = [];
 let currentCoeff = null;
@@ -121,6 +149,20 @@ function generatePrediction() {
   predictions.unshift(pred);
   if (predictions.length > MAX_PREDICTIONS) predictions.pop();
   console.log(`[PRED] Prédiction générée — Cible ≥${pred.target}x | Fenêtre ${pred.windowStartFmt}→${pred.windowEndFmt} | Signal ${pred.signal}`);
+
+  // Telegram notification
+  const levelEmoji = pred.level === 'PRUDENCE' ? '🟡' : pred.level === 'MAX' ? '🟢' : '🔵';
+  const msg =
+    `🚀 <b>NOUVELLE PRÉDICTION LUCKY JET</b>\n\n` +
+    `${levelEmoji} <b>Cible :</b> ≥ ${pred.target}x\n` +
+    `📊 <b>Niveau :</b> ${pred.level}\n` +
+    `📡 <b>Signal :</b> ${pred.signal}\n` +
+    `🎯 <b>Confiance :</b> ${pred.confidence}%\n` +
+    `⏱ <b>Fenêtre de jeu :</b> ${pred.windowStartFmt} → ${pred.windowEndFmt}\n` +
+    `\n` +
+    `📈 Accumulation : ${pred.accDurMin} min | Crashes ×1 : ${pred.onesInAcc} | Moy 10 : ${pred.avg10}x\n` +
+    (pred.note ? `\nℹ️ ${pred.note}` : '');
+  sendTelegram(msg);
 }
 
 function validatePredictions(round) {
@@ -138,6 +180,13 @@ function validatePredictions(round) {
         pred.status = 'success';
         pred.resolvedAt = now;
         console.log(`[PRED] ✅ VALIDÉE — Cible ≥${pred.target}x atteinte avec ${round.multiplier}x`);
+        sendTelegram(
+          `✅ <b>PRÉDICTION RÉUSSIE</b>\n\n` +
+          `🎯 Cible : ≥ ${pred.target}x\n` +
+          `🚀 Atteinte avec : <b>${round.multiplier}x</b>\n` +
+          `⏱ Fenêtre : ${pred.windowStartFmt} → ${pred.windowEndFmt}\n` +
+          `📡 Signal initial : ${pred.signal} (${pred.confidence}%)`
+        );
       }
     }
 
@@ -146,6 +195,13 @@ function validatePredictions(round) {
       pred.status = 'fail';
       pred.resolvedAt = now;
       console.log(`[PRED] ❌ ÉCHOUÉE — Cible ≥${pred.target}x non atteinte (meilleur: ${pred.bestMultiplier ?? 0}x)`);
+      sendTelegram(
+        `❌ <b>PRÉDICTION ÉCHOUÉE</b>\n\n` +
+        `🎯 Cible : ≥ ${pred.target}x\n` +
+        `📉 Meilleur résultat : ${pred.bestMultiplier ?? 0}x\n` +
+        `⏱ Fenêtre : ${pred.windowStartFmt} → ${pred.windowEndFmt}\n` +
+        `📡 Signal initial : ${pred.signal} (${pred.confidence}%)`
+      );
     }
   }
 }
@@ -419,6 +475,18 @@ app.get('/api/predictions', (req, res) => {
 const PORT = 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[API] Serveur Express lancé sur le port ${PORT}`);
+  if (TG_ENABLED) {
+    console.log(`[TG] Bot Telegram activé (chat ${TG_CHAT_ID})`);
+    sendTelegram(
+      `🤖 <b>Lucky Jet Tracker connecté</b>\n\n` +
+      `Le bot enverra automatiquement :\n` +
+      `• Chaque nouvelle prédiction (toutes les 5 min)\n` +
+      `• Les résultats ✅ / ❌\n\n` +
+      `Bonne chance ! 🚀`
+    );
+  } else {
+    console.log(`[TG] Bot Telegram désactivé (TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant)`);
+  }
   startConnection();
   scheduleNextPrediction();
 });
