@@ -1,5 +1,5 @@
 entrypoint = "main.py"
-modules = ["python-3.10", "nodejs-20"]
+modules = ["nodejs-20"]
 
 [nix]
 channel = "stable-23_05"
