@@ -13,10 +13,30 @@ app.use(cors());
 app.use(express.json());
 
 // Configuration
-const B_TOKEN = '43902aeaf456d9783e548073407c9966192027c9c638b1ca4ad3d8714b08e868b91283398cea8e4a6e09dbc2a72bb456e13703bf68c71e7a3ccc278fc1cfa343184c7ff1cf0929af9cfce9ea32b527c6ec5d1bed8fba0ad368dd8f1bdeed2c767d03c6a9a802e54eb844d895c622a90e67ffebf01d3b94b23e4ceb675d51f8f5f84f01de038b84d58dae795121f0545ffd73b083fb9ba3209e6085db.d3bd3e087e2b9dfc46f3e9c9769003e2.077dee8d-c923-4c02-9bee-757573662e69';
 const GATEWAY_HTTP = 'https://crash-gateway-grm-cr.gamedev-tech.cc';
 const GATEWAY_WS   = 'wss://crash-gateway-grm-cr.gamedev-tech.cc/websocket/lifecycle';
-const MAX_HISTORY = 100;
+const MAX_HISTORY  = 100;
+
+// Game token — chargé depuis fichier, env, ou valeur par défaut
+const TOKEN_FILE = path.join(__dirname, 'game-token.json');
+const TOKEN_DEFAULT = process.env.GAME_TOKEN || '43902aeaf456d9783e548073407c9966192027c9c638b1ca4ad3d8714b08e868b91283398cea8e4a6e09dbc2a72bb456e13703bf68c71e7a3ccc278fc1cfa343184c7ff1cf0929af9cfce9ea32b527c6ec5d1bed8fba0ad368dd8f1bdeed2c767d03c6a9a802e54eb844d895c622a90e67ffebf01d3b94b23e4ceb675d51f8f5f84f01de038b84d58dae795121f0545ffd73b083fb9ba3209e6085db.d3bd3e087e2b9dfc46f3e9c9769003e2.077dee8d-c923-4c02-9bee-757573662e69';
+
+function loadGameToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const { token } = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+      if (token) { console.log('[AUTH] Token chargé depuis le fichier'); return token; }
+    }
+  } catch {}
+  return TOKEN_DEFAULT;
+}
+
+function saveGameToken(token) {
+  try { fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, updatedAt: new Date().toISOString() })); }
+  catch (e) { console.error('[AUTH] Erreur sauvegarde token:', e.message); }
+}
+
+let B_TOKEN = loadGameToken();
 
 // Telegram
 const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
@@ -143,7 +163,38 @@ async function handleTelegramUpdate(update) {
       await sendTelegramTo(chatId, '👋 Vous ne recevrez plus de prédictions. Tapez /start à tout moment pour vous réabonner.');
     }
   } else if (text === '/stats') {
-    await sendTelegramTo(chatId, `📊 <b>Stats du bot</b>\n\nAbonnés actifs : ${subscribers.size}\nTours en historique : ${history.length}\nPrédictions enregistrées : ${predictions.length}`);
+    await sendTelegramTo(chatId, `📊 <b>Stats du bot</b>\n\nAbonnés actifs : ${subscribers.size}\nTours en historique : ${history.length}\nPrédictions enregistrées : ${predictions.length}\nStatut connexion : ${wsStatus}`);
+
+  } else if (text.startsWith('/settoken')) {
+    // Owner only
+    if (chatId !== Number(TG_CHAT_ID)) {
+      await sendTelegramTo(chatId, '⛔ Commande réservée à l\'administrateur.');
+      return;
+    }
+    const newToken = text.replace('/settoken', '').trim();
+    if (!newToken) {
+      await sendTelegramTo(chatId,
+        '🔑 <b>Mise à jour du token de connexion</b>\n\n' +
+        'Envoyez la commande suivie de votre token :\n' +
+        '<code>/settoken VOTRE_TOKEN_ICI</code>\n\n' +
+        '<b>Comment trouver votre token sur iPhone :</b>\n' +
+        '1. Ouvrez Safari → allez sur 1win.com\n' +
+        '2. Connectez-vous et ouvrez Lucky Jet\n' +
+        '3. Dans la barre d\'URL, tapez exactement :\n' +
+        '<code>javascript:void(fetch("/user/auth").then(r=>r.text()).then(t=>alert(t.slice(0,100))))</code>\n\n' +
+        'Ou utilisez l\'app Replit → Secrets → GAME_TOKEN pour le coller directement.'
+      );
+      return;
+    }
+    B_TOKEN = newToken;
+    saveGameToken(newToken);
+    console.log('[AUTH] Token mis à jour via Telegram — reconnexion...');
+    await sendTelegramTo(chatId, '✅ Token mis à jour ! Reconnexion au serveur de jeu en cours...');
+    wsStatus = 'reconnecting';
+    wsError = null;
+    if (ws) try { ws.terminate(); } catch {}
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    startConnection();
   }
 }
 
@@ -533,22 +584,32 @@ function connectWebSocket(token, channels) {
   });
 }
 
-function scheduleReconnect() {
+let reconnectDelay = 5000;
+
+function scheduleReconnect(delay = reconnectDelay) {
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(startConnection, 5000);
+  // Backoff: 5s → 15s → 30s → 60s max when auth keeps failing
+  reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+  console.log(`[AUTH] Nouvelle tentative dans ${Math.round(delay / 1000)}s`);
+  reconnectTimer = setTimeout(startConnection, delay);
 }
 
 async function startConnection() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectDelay = 5000; // reset on each manual call
   try {
     const { mainToken: token, channels } = await authenticate();
     mainToken = token;
+    wsError = null;
+    reconnectDelay = 5000;
     connectWebSocket(token, channels);
   } catch (err) {
     console.error('[AUTH] Erreur:', err.message);
     wsStatus = 'error';
     wsError = err.message;
-    scheduleReconnect();
+    // If token is bad (1010), wait longer before retry
+    const isBadToken = err.message.includes('1010') || err.message.includes('Something went wrong');
+    scheduleReconnect(isBadToken ? 60000 : reconnectDelay);
   }
 }
 
@@ -618,9 +679,10 @@ app.listen(PORT, '0.0.0.0', () => {
     // Set the bot's command list (autocomplete in Telegram)
     tgApi('setMyCommands', {
       commands: [
-        { command: 'start',  description: "S'abonner et ouvrir l'application" },
-        { command: 'stop',   description: 'Se désabonner des prédictions' },
-        { command: 'stats',  description: 'Voir les stats du bot' },
+        { command: 'start',    description: "S'abonner et ouvrir l'application" },
+        { command: 'stop',     description: 'Se désabonner des prédictions' },
+        { command: 'stats',    description: 'Voir les stats du bot' },
+        { command: 'settoken', description: '(Admin) Mettre à jour le token de connexion' },
       ],
     });
     sendTelegram(
