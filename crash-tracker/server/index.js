@@ -650,6 +650,100 @@ function hitIntervals(sorted, threshold) {
   return gaps;
 }
 
+// ── Series helpers ────────────────────────────────────────────────────────────
+
+function buildRuns(sortedRounds) {
+  const runs = [];
+  let cur = null;
+  for (const r of sortedRounds) {
+    const isLow = r.multiplier < 2;
+    if (!cur || cur.isLow !== isLow) {
+      if (cur) runs.push(cur);
+      cur = { isLow, values: [r.multiplier], count: 1 };
+    } else {
+      cur.values.push(r.multiplier);
+      cur.count++;
+    }
+  }
+  if (cur) runs.push(cur);
+  return runs;
+}
+
+function horizonProb(sortedMults, windowSize, threshold) {
+  let hits = 0;
+  const total = sortedMults.length - windowSize;
+  if (total <= 0) return 0;
+  for (let i = 0; i < total; i++) {
+    const win = sortedMults.slice(i, i + windowSize);
+    if (win.some(v => v >= threshold)) hits++;
+  }
+  return Math.round((hits / total) * 100);
+}
+
+// Conditional horizon: given we just saw N consecutive lows, prob of >= threshold in next K rounds
+function conditionalHorizon(runs, windowSize, threshold) {
+  // Find all positions in mults array where a low run of >= currentLen just ended
+  // Simplified: look at all historical positions after a low run and check next K
+  let hits = 0;
+  let total = 0;
+  for (let i = 0; i < runs.length - 1; i++) {
+    if (!runs[i].isLow) continue;
+    // After this low run, what happened in next windowSize rounds?
+    const nextVals = [];
+    let remaining = windowSize;
+    for (let j = i + 1; j < runs.length && remaining > 0; j++) {
+      const take = Math.min(remaining, runs[j].values.length);
+      nextVals.push(...runs[j].values.slice(0, take));
+      remaining -= take;
+    }
+    if (nextVals.length === 0) continue;
+    total++;
+    if (nextVals.some(v => v >= threshold)) hits++;
+  }
+  return total > 0 ? Math.round((hits / total) * 100) : horizonProb([], windowSize, threshold);
+}
+
+function drySpellInfo(sortedMults, threshold) {
+  let count = 0;
+  for (let i = sortedMults.length - 1; i >= 0; i--) {
+    if (sortedMults[i] >= threshold) break;
+    count++;
+  }
+  const hitIdxs = sortedMults.reduce((acc, v, i) => { if (v >= threshold) acc.push(i); return acc; }, []);
+  const gaps = [];
+  for (let i = 1; i < hitIdxs.length; i++) gaps.push(hitIdxs[i] - hitIdxs[i - 1]);
+  const avgInterval = Math.round(avgOfArray(gaps)) || 8;
+  const percentile  = Math.min(100, Math.round((count / avgInterval) * 100));
+  let status = 'normal';
+  if (percentile >= 90) status = 'critique';
+  else if (percentile >= 70) status = 'élevé';
+  else if (percentile >= 50) status = 'modéré';
+  return { rounds: count, avgInterval, percentile, status };
+}
+
+function roundCycleBetweenHits(sortedMults, threshold) {
+  const hitIdxs = sortedMults.reduce((acc, v, i) => { if (v >= threshold) acc.push(i); return acc; }, []);
+  if (hitIdxs.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < hitIdxs.length; i++) gaps.push(hitIdxs[i] - hitIdxs[i - 1]);
+  const avg = Math.round(avgOfArray(gaps));
+  const lastIdx = hitIdxs[hitIdxs.length - 1];
+  const roundsSince = sortedMults.length - 1 - lastIdx;
+  return { avg, min: Math.min(...gaps), max: Math.max(...gaps), roundsSince, due: roundsSince >= avg };
+}
+
+function windowStats(arr, size) {
+  const w = arr.slice(-size);
+  if (w.length === 0) return null;
+  const avg     = Math.round(avgOfArray(w) * 100) / 100;
+  const hi      = Math.round(Math.max(...w) * 100) / 100;
+  const lo      = Math.round(Math.min(...w) * 100) / 100;
+  const pctLow  = Math.round(w.filter(v => v < 2).length / w.length * 100);
+  const pct2x   = Math.round(w.filter(v => v >= 2 && v < 5).length / w.length * 100);
+  const pct5x   = Math.round(w.filter(v => v >= 5).length / w.length * 100);
+  return { avg, hi, lo, pctLow, pct2x, pct5x, size: w.length };
+}
+
 function runAIAnalysis() {
   if (history.length < 5) return null;
 
@@ -757,16 +851,137 @@ function runAIAnalysis() {
   const last5    = mults.slice(-5);
   const anomalies = last5.filter(m => Math.abs(m - mean) > 2 * stdDev);
 
+  // ── K. Series / Run analysis ──────────────────────────────────────────────
+  const runs = buildRuns(sorted);
+  const currentRunInfo  = runs[runs.length - 1];
+  const currentRunType  = currentRunInfo.isLow ? 'low' : 'high';
+  const currentRunCount = currentRunInfo.count;
+  const currentRunVals  = currentRunInfo.values;
+  const currentRunAvg   = Math.round(avgOfArray(currentRunVals) * 100) / 100;
+
+  // Trend within current run
+  let runTrend = 'flat';
+  if (currentRunVals.length >= 2) {
+    const diff = currentRunVals[currentRunVals.length - 1] - currentRunVals[0];
+    if (diff > 0.15) runTrend = 'rising';
+    else if (diff < -0.15) runTrend = 'falling';
+  }
+
+  // For each completed low run, record length → what came next
+  const afterLowRun = {}; // length → values[]
+  for (let i = 0; i < runs.length - 1; i++) {
+    if (!runs[i].isLow) continue;
+    const len = runs[i].count;
+    if (!afterLowRun[len]) afterLowRun[len] = [];
+    afterLowRun[len].push(...runs[i + 1].values.slice(0, 1));
+  }
+
+  // Break stats: after a low run of >= currentRunCount, what happened next?
+  let breakStats = null;
+  if (currentRunType === 'low') {
+    const relevant = [];
+    for (const [len, vals] of Object.entries(afterLowRun)) {
+      if (Number(len) >= currentRunCount) relevant.push(...vals);
+    }
+    if (relevant.length > 0) {
+      const avgBreak = avgOfArray(relevant);
+      const expectedZone = getZone(avgBreak);
+      breakStats = {
+        dataPoints:        relevant.length,
+        avgBreakValue:     Math.round(avgBreak * 100) / 100,
+        expectedBreakZone: expectedZone,
+        expectedBreakLabel:ZONE_LABELS[expectedZone],
+        breakProb:         Math.round(relevant.filter(v => v >= 2).length / relevant.length * 100),
+        pct5x:             Math.round(relevant.filter(v => v >= 5).length  / relevant.length * 100),
+        pct10x:            Math.round(relevant.filter(v => v >= 10).length / relevant.length * 100),
+        samples:           relevant.map(v => Math.round(v * 100) / 100).slice(0, 8),
+      };
+    }
+  }
+
+  // ── L. Multi-horizon probabilities ────────────────────────────────────────
+  // Global rates
+  const horizons = {
+    next1: { prob2x: horizonProb(mults, 1, 2), prob5x: horizonProb(mults, 1, 5),  prob10x: horizonProb(mults, 1, 10) },
+    next2: { prob2x: horizonProb(mults, 2, 2), prob5x: horizonProb(mults, 2, 5),  prob10x: horizonProb(mults, 2, 10) },
+    next3: { prob2x: horizonProb(mults, 3, 2), prob5x: horizonProb(mults, 3, 5),  prob10x: horizonProb(mults, 3, 10) },
+    next5: { prob2x: horizonProb(mults, 5, 2), prob5x: horizonProb(mults, 5, 5),  prob10x: horizonProb(mults, 5, 10) },
+  };
+  // Conditional rates (after any low run ended)
+  const condHorizons = currentRunType === 'low' ? {
+    next1: { prob2x: conditionalHorizon(runs, 1, 2), prob5x: conditionalHorizon(runs, 1, 5),  prob10x: conditionalHorizon(runs, 1, 10) },
+    next2: { prob2x: conditionalHorizon(runs, 2, 2), prob5x: conditionalHorizon(runs, 2, 5),  prob10x: conditionalHorizon(runs, 2, 10) },
+    next3: { prob2x: conditionalHorizon(runs, 3, 2), prob5x: conditionalHorizon(runs, 3, 5),  prob10x: conditionalHorizon(runs, 3, 10) },
+    next5: { prob2x: conditionalHorizon(runs, 5, 2), prob5x: conditionalHorizon(runs, 5, 5),  prob10x: conditionalHorizon(runs, 5, 10) },
+  } : null;
+
+  // ── M. Dry spell (rounds since last threshold) ────────────────────────────
+  const drySpell = {
+    since2x:  drySpellInfo(mults, 2),
+    since5x:  drySpellInfo(mults, 5),
+    since10x: drySpellInfo(mults, 10),
+  };
+
+  // ── N. Cycle detection (rounds between big hits) ──────────────────────────
+  const cycle2x  = roundCycleBetweenHits(mults, 2);
+  const cycle5x  = roundCycleBetweenHits(mults, 5);
+  const cycle10x = roundCycleBetweenHits(mults, 10);
+
+  // ── O. Rolling windows ────────────────────────────────────────────────────
+  const windows = {
+    last5:  windowStats(mults, 5),
+    last10: windowStats(mults, 10),
+    last20: windowStats(mults, 20),
+  };
+
+  // Series signal
+  let seriesSignal = 'EN ATTENTE';
+  let seriesSignalConf = 50;
+  if (currentRunType === 'low') {
+    const dryScore = (drySpell.since10x.percentile + drySpell.since5x.percentile) / 2;
+    if (currentRunCount >= 5 || dryScore >= 80) {
+      seriesSignal = 'REBOND FORT';
+      seriesSignalConf = Math.min(50 + currentRunCount * 5 + Math.round(dryScore / 5), 92);
+    } else if (currentRunCount >= 3 || dryScore >= 60) {
+      seriesSignal = 'REBOND';
+      seriesSignalConf = Math.min(50 + currentRunCount * 4 + Math.round(dryScore / 8), 82);
+    } else {
+      seriesSignal = 'PRUDENCE';
+      seriesSignalConf = 52;
+    }
+  } else {
+    seriesSignal = 'PRUDENCE';
+    seriesSignalConf = 60;
+  }
+
   // ── I. Composite AI score ─────────────────────────────────────────────────
   const votes = {};
   for (const z of ZONES) votes[z] = 0;
-  for (const [z, p] of Object.entries(nextProbs)) votes[z] += p * 0.40;
-  if (patternNext) votes[patternNext] += patternConf * 0.35;
-  if (momentum === 'bullish') { votes['C'] += 6; votes['D'] += 10; votes['E'] += 6; }
-  else                        { votes['A'] += 8; votes['B'] += 10; }
-  // Timing boost: if 10x is overdue, boost D/E zones
-  if (msUntil10x < 0) { votes['D'] += 12; votes['E'] += 8; }
-  if (msUntil5x  < 0) { votes['C'] += 8;  votes['D'] += 6; }
+  // Markov (30%)
+  for (const [z, p] of Object.entries(nextProbs)) votes[z] += p * 0.30;
+  // Pattern (25%)
+  if (patternNext) votes[patternNext] += patternConf * 0.25;
+  // Momentum (15%)
+  if (momentum === 'bullish') { votes['C'] += 5; votes['D'] += 8; votes['E'] += 5; }
+  else                        { votes['A'] += 6; votes['B'] += 8; }
+  // Timing boost (15%)
+  if (msUntil10x < 0) { votes['D'] += 10; votes['E'] += 7; }
+  if (msUntil5x  < 0) { votes['C'] += 7;  votes['D'] += 5; }
+  // Series boost (20%) — most impactful new addition
+  if (currentRunType === 'low') {
+    const streakBonus = Math.min(currentRunCount * 3, 18);
+    votes['C'] += streakBonus * 0.5;
+    votes['D'] += streakBonus * 0.9;
+    votes['E'] += streakBonus * 0.4;
+    if (breakStats) {
+      votes[breakStats.expectedBreakZone] += Math.min(breakStats.dataPoints * 1.5, 14);
+    }
+  }
+  if (drySpell.since10x.percentile >= 70) { votes['D'] += 10; votes['E'] += 8; }
+  if (drySpell.since5x.percentile  >= 80) { votes['C'] += 7;  votes['D'] += 5; }
+  if (cycle10x && drySpell.since10x.rounds >= cycle10x.avg) { votes['D'] += 12; votes['E'] += 8; }
+  if (cycle5x  && drySpell.since5x.rounds  >= cycle5x.avg)  { votes['C'] += 8;  votes['D'] += 5; }
+
   const topVote    = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
   const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
   const compositeConf = totalVotes > 0 ? Math.min(Math.round((topVote[1] / totalVotes) * 100), 93) : 50;
@@ -811,7 +1026,10 @@ function runAIAnalysis() {
   // Confidence score for entry plan
   let entryConf = compositeConf;
   if (patternNext && ['D', 'E', 'F'].includes(patternNext)) entryConf = Math.min(entryConf + 8, 94);
-  if (streakType === 'low' && streak >= 3) entryConf = Math.min(entryConf + 6, 94);
+  if (currentRunType === 'low' && currentRunCount >= 3)      entryConf = Math.min(entryConf + 7, 94);
+  if (currentRunType === 'low' && currentRunCount >= 5)      entryConf = Math.min(entryConf + 5, 94);
+  if (drySpell.since10x.status === 'élevé')   entryConf = Math.min(entryConf + 5, 94);
+  if (drySpell.since10x.status === 'critique') entryConf = Math.min(entryConf + 9, 94);
   if (momentum === 'bullish') entryConf = Math.min(entryConf + 4, 94);
 
   // Timing labels
@@ -900,6 +1118,28 @@ function runAIAnalysis() {
       zone: topVote[0], label: ZONE_LABELS[topVote[0]],
       confidence: compositeConf,
       votes: Object.fromEntries(Object.entries(votes).map(([k, v]) => [k, Math.round(v)])),
+    },
+    // ── Series data (new) ──
+    series: {
+      currentRun: {
+        type:    currentRunType,
+        count:   currentRunCount,
+        avg:     currentRunAvg,
+        trend:   runTrend,
+        values:  currentRunVals.slice(-8).map(v => Math.round(v * 100) / 100),
+      },
+      breakStats,
+      horizons,
+      condHorizons,
+      drySpell,
+      cycles: {
+        c2x:  cycle2x,
+        c5x:  cycle5x,
+        c10x: cycle10x,
+      },
+      windows,
+      signal:     seriesSignal,
+      signalConf: seriesSignalConf,
     },
     zoneLabels: ZONE_LABELS,
     basedOn: history.length,
