@@ -636,42 +636,92 @@ function calcEMA(data, period) {
   return ema;
 }
 
+function fmtTs(ts) { return new Date(ts).toTimeString().slice(0, 8); }
+
+function avgOfArray(arr) {
+  if (!arr.length) return 0;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+function hitIntervals(sorted, threshold) {
+  const hits = sorted.filter(r => r.multiplier >= threshold);
+  const gaps = [];
+  for (let i = 1; i < hits.length; i++) gaps.push(hits[i].timestamp - hits[i - 1].timestamp);
+  return gaps;
+}
+
 function runAIAnalysis() {
   if (history.length < 5) return null;
 
+  const now    = Date.now();
   const sorted = [...history].sort((a, b) => a.timestamp - b.timestamp);
   const zones  = sorted.map(r => getZone(r.multiplier));
   const mults  = sorted.map(r => r.multiplier);
+  const stamps = sorted.map(r => r.timestamp);
 
-  // ── 1. Markov chain (transition matrix) ───────────────────────────────────
+  // ── A. Real timing — average round duration ───────────────────────────────
+  const roundGaps = [];
+  for (let i = 1; i < stamps.length; i++) roundGaps.push(stamps[i] - stamps[i - 1]);
+  const avgRoundMs = avgOfArray(roundGaps) || 25000;  // fallback 25s
+  const lastRoundTs = stamps[stamps.length - 1];
+  const msSinceLastRound = now - lastRoundTs;
+  const msUntilNextRound = Math.max(0, avgRoundMs - msSinceLastRound);
+
+  // ── B. Intervals between big hits (real data) ─────────────────────────────
+  const gaps5x  = hitIntervals(sorted, 5);
+  const gaps10x = hitIntervals(sorted, 10);
+  const gaps50x = hitIntervals(sorted, 50);
+
+  const avg5xMs  = avgOfArray(gaps5x)  || 3 * 60000;
+  const avg10xMs = avgOfArray(gaps10x) || 8 * 60000;
+  const avg50xMs = avgOfArray(gaps50x) || 35 * 60000;
+
+  const lastBig5  = [...sorted].reverse().find(r => r.multiplier >= 5);
+  const lastBig10 = [...sorted].reverse().find(r => r.multiplier >= 10);
+  const lastBig50 = [...sorted].reverse().find(r => r.multiplier >= 50);
+
+  // Time since last big hit
+  const msSince5x  = lastBig5  ? now - lastBig5.timestamp  : Infinity;
+  const msSince10x = lastBig10 ? now - lastBig10.timestamp : Infinity;
+  const msSince50x = lastBig50 ? now - lastBig50.timestamp : Infinity;
+
+  // Expected next hit timestamp (based on historical interval)
+  const next5xTs  = lastBig5  ? lastBig5.timestamp  + avg5xMs  : now + avg5xMs;
+  const next10xTs = lastBig10 ? lastBig10.timestamp + avg10xMs : now + avg10xMs;
+  const next50xTs = lastBig50 ? lastBig50.timestamp + avg50xMs : now + avg50xMs;
+
+  // ms until next expected hits (can be negative = overdue = higher urgency)
+  const msUntil5x  = next5xTs  - now;
+  const msUntil10x = next10xTs - now;
+  const msUntil50x = next50xTs - now;
+
+  // ── C. Markov chain ───────────────────────────────────────────────────────
   const counts = {};
   for (const z of ZONES) { counts[z] = {}; for (const z2 of ZONES) counts[z][z2] = 0; }
   for (let i = 0; i < zones.length - 1; i++) counts[zones[i]][zones[i + 1]]++;
-
   const markov = {};
   for (const from of ZONES) {
     const total = Object.values(counts[from]).reduce((a, b) => a + b, 0);
     markov[from] = {};
     for (const to of ZONES) markov[from][to] = total > 0 ? Math.round((counts[from][to] / total) * 100) : 0;
   }
-
-  const lastZone = zones[zones.length - 1];
+  const lastZone  = zones[zones.length - 1];
   const nextProbs = markov[lastZone];
   const bestNext  = Object.entries(nextProbs).sort((a, b) => b[1] - a[1])[0];
 
-  // ── 2. N-gram pattern detection ───────────────────────────────────────────
+  // ── D. N-gram patterns ────────────────────────────────────────────────────
   const trigrams = {};
   for (let i = 0; i < zones.length - 2; i++) {
     const key = `${zones[i]}-${zones[i+1]}-${zones[i+2]}`;
     trigrams[key] = (trigrams[key] || 0) + 1;
   }
-  const topTrigrams = Object.entries(trigrams).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const bigram = zones.length >= 2 ? `${zones[zones.length - 2]}-${zones[zones.length - 1]}` : null;
-  const matching = bigram ? topTrigrams.filter(([k]) => k.startsWith(bigram)) : [];
-  const patternNext = matching.length > 0 ? matching[0][0].split('-')[2] : null;
-  const patternConf = matching.length > 0 ? Math.min(matching[0][1] * 15, 92) : 0;
+  const topTrigrams  = Object.entries(trigrams).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const bigram       = zones.length >= 2 ? `${zones[zones.length - 2]}-${zones[zones.length - 1]}` : null;
+  const matching     = bigram ? topTrigrams.filter(([k]) => k.startsWith(bigram)) : [];
+  const patternNext  = matching.length > 0 ? matching[0][0].split('-')[2] : null;
+  const patternConf  = matching.length > 0 ? Math.min(matching[0][1] * 15, 92) : 0;
+  const patternCount = matching.length > 0 ? matching[0][1] : 0;
 
-  // 4-grams for deeper pattern
   const fourgrams = {};
   for (let i = 0; i < zones.length - 3; i++) {
     const key = `${zones[i]}-${zones[i+1]}-${zones[i+2]}-${zones[i+3]}`;
@@ -679,14 +729,14 @@ function runAIAnalysis() {
   }
   const topFourgrams = Object.entries(fourgrams).sort((a, b) => b[1] - a[1]).slice(0, 3);
 
-  // ── 3. EMA momentum ───────────────────────────────────────────────────────
+  // ── E. EMA momentum ───────────────────────────────────────────────────────
   const ema5  = calcEMA(mults, 5);
   const ema20 = calcEMA(mults, Math.min(20, mults.length));
-  const momentum = ema5 > ema20 ? 'bullish' : 'bearish';
+  const momentum         = ema5 > ema20 ? 'bullish' : 'bearish';
   const momentumStrength = ema20 > 0 ? Math.round(Math.abs(ema5 - ema20) / ema20 * 100) : 0;
 
-  // ── 4. Streak analysis ────────────────────────────────────────────────────
-  const lastZ = zones[zones.length - 1];
+  // ── F. Streak ────────────────────────────────────────────────────────────
+  const lastZ     = zones[zones.length - 1];
   const streakType = lastZ <= 'B' ? 'low' : 'high';
   let streak = 1;
   for (let i = zones.length - 2; i >= 0; i--) {
@@ -695,75 +745,148 @@ function runAIAnalysis() {
     else break;
   }
 
-  // ── 5. Zone frequency in last 20 rounds ──────────────────────────────────
+  // ── G. Zone frequency ────────────────────────────────────────────────────
   const last20zones = zones.slice(-20);
   const zoneFreq = {};
   for (const z of ZONES) zoneFreq[z] = Math.round((last20zones.filter(x => x === z).length / last20zones.length) * 100);
 
-  // ── 6. Regression — linear trend slope on last 10 rounds ─────────────────
-  const last10 = mults.slice(-10);
-  const n = last10.length;
-  const xs = last10.map((_, i) => i);
-  const sumX = xs.reduce((a, b) => a + b, 0);
-  const sumY = last10.reduce((a, b) => a + b, 0);
-  const sumXY = xs.reduce((s, x, i) => s + x * last10[i], 0);
-  const sumX2 = xs.reduce((s, x) => s + x * x, 0);
-  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX) || 0;
-
-  // ── 7. Composite AI prediction ────────────────────────────────────────────
-  // Weighted vote: Markov (40%) + Pattern (35%) + Momentum (25%)
-  const votes = {};
-  for (const z of ZONES) votes[z] = 0;
-  // Markov votes
-  for (const [z, p] of Object.entries(nextProbs)) votes[z] += p * 0.40;
-  // Pattern vote
-  if (patternNext) votes[patternNext] += patternConf * 0.35;
-  // Momentum: if bullish, up-weight C/D/E; if bearish, up-weight A/B
-  if (momentum === 'bullish') {
-    votes['C'] += 8; votes['D'] += 10; votes['E'] += 5;
-  } else {
-    votes['A'] += 8; votes['B'] += 10;
-  }
-  const topVote = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
-  const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
-  const compositeConf = totalVotes > 0 ? Math.min(Math.round((topVote[1] / totalVotes) * 100), 91) : 50;
-
-  // ── 8. Anomaly detection ──────────────────────────────────────────────────
-  const mean = mults.reduce((a, b) => a + b, 0) / mults.length;
+  // ── H. Anomaly detection ──────────────────────────────────────────────────
+  const mean     = mults.reduce((a, b) => a + b, 0) / mults.length;
   const variance = mults.reduce((s, x) => s + (x - mean) ** 2, 0) / mults.length;
-  const stdDev = Math.sqrt(variance);
-  const last5 = mults.slice(-5);
+  const stdDev   = Math.sqrt(variance);
+  const last5    = mults.slice(-5);
   const anomalies = last5.filter(m => Math.abs(m - mean) > 2 * stdDev);
 
+  // ── I. Composite AI score ─────────────────────────────────────────────────
+  const votes = {};
+  for (const z of ZONES) votes[z] = 0;
+  for (const [z, p] of Object.entries(nextProbs)) votes[z] += p * 0.40;
+  if (patternNext) votes[patternNext] += patternConf * 0.35;
+  if (momentum === 'bullish') { votes['C'] += 6; votes['D'] += 10; votes['E'] += 6; }
+  else                        { votes['A'] += 8; votes['B'] += 10; }
+  // Timing boost: if 10x is overdue, boost D/E zones
+  if (msUntil10x < 0) { votes['D'] += 12; votes['E'] += 8; }
+  if (msUntil5x  < 0) { votes['C'] += 8;  votes['D'] += 6; }
+  const topVote    = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+  const compositeConf = totalVotes > 0 ? Math.min(Math.round((topVote[1] / totalVotes) * 100), 93) : 50;
+
+  // ── J. Entry plan — CORE OUTPUT ───────────────────────────────────────────
+  // Determine the most relevant upcoming hit and build entry window around it
+  let entryTarget, entryTargetMs, entryTargetLabel, entryUrgency;
+
+  if (msUntil10x <= 2 * 60000 && msUntil10x > -5 * 60000) {
+    // 10x is within ±5 min window — recommend entering for it
+    entryTarget      = '≥ 10x';
+    entryTargetMs    = next10xTs;
+    entryTargetLabel = 'Hit ≥ 10x attendu';
+    entryUrgency     = msUntil10x < 0 ? 'EN RETARD' : msUntil10x < 60000 ? 'IMMINENT' : 'BIENTÔT';
+  } else if (msUntil5x <= 90000 && msUntil5x > -3 * 60000) {
+    entryTarget      = '≥ 5x';
+    entryTargetMs    = next5xTs;
+    entryTargetLabel = 'Hit ≥ 5x attendu';
+    entryUrgency     = msUntil5x < 0 ? 'EN RETARD' : 'BIENTÔT';
+  } else if (msUntil50x <= 3 * 60000 && msUntil50x > -8 * 60000) {
+    entryTarget      = '≥ 50x';
+    entryTargetMs    = next50xTs;
+    entryTargetLabel = 'Hit ≥ 50x attendu';
+    entryUrgency     = msUntil50x < 0 ? 'EN RETARD' : 'BIENTÔT';
+  } else {
+    // Default: next expected 10x
+    entryTarget      = '≥ 10x';
+    entryTargetMs    = next10xTs;
+    entryTargetLabel = 'Prochain hit ≥ 10x estimé';
+    entryUrgency     = 'EN ATTENTE';
+  }
+
+  // Entry window: 90s before expected hit → 2 min after
+  const windowFrom = entryTargetMs - 90000;
+  const windowTo   = entryTargetMs + 2 * 60000;
+
+  // Countdown to window open (ms, can be negative = window already open)
+  const msToWindowOpen  = windowFrom - now;
+  const msToWindowClose = windowTo   - now;
+  const windowOpen = msToWindowOpen <= 0 && msToWindowClose > 0;
+
+  // Confidence score for entry plan
+  let entryConf = compositeConf;
+  if (patternNext && ['D', 'E', 'F'].includes(patternNext)) entryConf = Math.min(entryConf + 8, 94);
+  if (streakType === 'low' && streak >= 3) entryConf = Math.min(entryConf + 6, 94);
+  if (momentum === 'bullish') entryConf = Math.min(entryConf + 4, 94);
+
+  // Timing labels
+  const roundAvgSec  = Math.round(avgRoundMs  / 1000);
+  const avg5xMin     = Math.round(avg5xMs  / 60000 * 10) / 10;
+  const avg10xMin    = Math.round(avg10xMs / 60000 * 10) / 10;
+  const avg50xMin    = Math.round(avg50xMs / 60000 * 10) / 10;
+
+  const msSince5xFmt  = lastBig5  ? `${Math.round(msSince5x  / 60000 * 10) / 10} min` : '—';
+  const msSince10xFmt = lastBig10 ? `${Math.round(msSince10x / 60000 * 10) / 10} min` : '—';
+  const msSince50xFmt = lastBig50 ? `${Math.round(msSince50x / 60000 * 10) / 10} min` : '—';
+
   return {
+    // ── Entry plan (main output) ──
+    entry: {
+      target:       entryTarget,
+      targetLabel:  entryTargetLabel,
+      urgency:      entryUrgency,
+      windowFrom:   fmtTs(windowFrom),
+      windowTo:     fmtTs(windowTo),
+      windowFromTs: windowFrom,
+      windowToTs:   windowTo,
+      windowOpen,
+      msToWindowOpen,
+      msToWindowClose,
+      hitExpectedAt:    fmtTs(entryTargetMs),
+      hitExpectedTs:    entryTargetMs,
+      confidence:   entryConf,
+      zone:         topVote[0],
+      zoneLabel:    ZONE_LABELS[topVote[0]],
+    },
+    // ── Timing analysis ──
+    timing: {
+      avgRoundSec:   roundAvgSec,
+      nextRoundIn:   Math.round(msUntilNextRound / 1000),
+      nextRoundAt:   fmtTs(now + msUntilNextRound),
+      avg5xMin, avg10xMin, avg50xMin,
+      msSince5x:  msSince5xFmt,
+      msSince10x: msSince10xFmt,
+      msSince50x: msSince50xFmt,
+      msUntil5x:  Math.round(msUntil5x / 1000),
+      msUntil10x: Math.round(msUntil10x / 1000),
+      msUntil50x: Math.round(msUntil50x / 1000),
+      next5xAt:   fmtTs(next5xTs),
+      next10xAt:  fmtTs(next10xTs),
+      next50xAt:  fmtTs(next50xTs),
+      last5x:  lastBig5  ? { mult: lastBig5.multiplier,  at: fmtTs(lastBig5.timestamp) }  : null,
+      last10x: lastBig10 ? { mult: lastBig10.multiplier, at: fmtTs(lastBig10.timestamp) } : null,
+      last50x: lastBig50 ? { mult: lastBig50.multiplier, at: fmtTs(lastBig50.timestamp) } : null,
+    },
+    // ── Markov ──
     markov: {
-      current: lastZone,
-      currentLabel: ZONE_LABELS[lastZone],
+      current: lastZone, currentLabel: ZONE_LABELS[lastZone],
       transitions: nextProbs,
       bestNext: { zone: bestNext[0], label: ZONE_LABELS[bestNext[0]], pct: bestNext[1] },
     },
+    // ── Patterns ──
     pattern: {
-      bigram,
-      patternNext,
+      bigram, patternNext,
       patternNextLabel: patternNext ? ZONE_LABELS[patternNext] : null,
-      patternConf,
+      patternConf, patternCount,
       topPatterns: topTrigrams.slice(0, 4).map(([key, count]) => ({
         sequence: key.split('-').map(z => ZONE_LABELS[z]).join(' → '),
-        zones: key.split('-'),
-        count,
-        pct: Math.round((count / (zones.length - 2)) * 100),
+        zones: key.split('-'), count,
+        pct: Math.round((count / Math.max(zones.length - 2, 1)) * 100),
       })),
       deepPatterns: topFourgrams.slice(0, 3).map(([key, count]) => ({
-        sequence: key.split('-').map(z => ZONE_LABELS[z]).join(' → '),
-        count,
+        sequence: key.split('-').map(z => ZONE_LABELS[z]).join(' → '), count,
       })),
     },
+    // ── Momentum ──
     momentum: {
       ema5:  Math.round(ema5  * 100) / 100,
       ema20: Math.round(ema20 * 100) / 100,
-      trend: momentum,
-      strength: momentumStrength,
-      slope: Math.round(slope * 100) / 100,
+      trend: momentum, strength: momentumStrength,
     },
     streak: { type: streakType, count: streak },
     zoneFreq,
@@ -774,14 +897,13 @@ function runAIAnalysis() {
       values: anomalies.map(m => Math.round(m * 100) / 100),
     },
     composite: {
-      zone: topVote[0],
-      label: ZONE_LABELS[topVote[0]],
+      zone: topVote[0], label: ZONE_LABELS[topVote[0]],
       confidence: compositeConf,
       votes: Object.fromEntries(Object.entries(votes).map(([k, v]) => [k, Math.round(v)])),
     },
     zoneLabels: ZONE_LABELS,
     basedOn: history.length,
-    generatedAt: formatTime(new Date()),
+    generatedAt: fmtTs(now),
   };
 }
 
