@@ -613,6 +613,178 @@ async function startConnection() {
   }
 }
 
+// ── AI Analysis ───────────────────────────────────────────────────────────────
+
+const ZONES = ['A', 'B', 'C', 'D', 'E', 'F'];
+const ZONE_LABELS = { A: '< 1.5x', B: '1.5–2x', C: '2–5x', D: '5–10x', E: '10–50x', F: '> 50x' };
+
+function getZone(mult) {
+  if (mult < 1.5) return 'A';
+  if (mult < 2)   return 'B';
+  if (mult < 5)   return 'C';
+  if (mult < 10)  return 'D';
+  if (mult < 50)  return 'E';
+  return 'F';
+}
+
+function calcEMA(data, period) {
+  if (data.length === 0) return 0;
+  const k = 2 / (period + 1);
+  const seed = data.slice(0, Math.min(period, data.length));
+  let ema = seed.reduce((a, b) => a + b, 0) / seed.length;
+  for (let i = seed.length; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
+  return ema;
+}
+
+function runAIAnalysis() {
+  if (history.length < 5) return null;
+
+  const sorted = [...history].sort((a, b) => a.timestamp - b.timestamp);
+  const zones  = sorted.map(r => getZone(r.multiplier));
+  const mults  = sorted.map(r => r.multiplier);
+
+  // ── 1. Markov chain (transition matrix) ───────────────────────────────────
+  const counts = {};
+  for (const z of ZONES) { counts[z] = {}; for (const z2 of ZONES) counts[z][z2] = 0; }
+  for (let i = 0; i < zones.length - 1; i++) counts[zones[i]][zones[i + 1]]++;
+
+  const markov = {};
+  for (const from of ZONES) {
+    const total = Object.values(counts[from]).reduce((a, b) => a + b, 0);
+    markov[from] = {};
+    for (const to of ZONES) markov[from][to] = total > 0 ? Math.round((counts[from][to] / total) * 100) : 0;
+  }
+
+  const lastZone = zones[zones.length - 1];
+  const nextProbs = markov[lastZone];
+  const bestNext  = Object.entries(nextProbs).sort((a, b) => b[1] - a[1])[0];
+
+  // ── 2. N-gram pattern detection ───────────────────────────────────────────
+  const trigrams = {};
+  for (let i = 0; i < zones.length - 2; i++) {
+    const key = `${zones[i]}-${zones[i+1]}-${zones[i+2]}`;
+    trigrams[key] = (trigrams[key] || 0) + 1;
+  }
+  const topTrigrams = Object.entries(trigrams).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const bigram = zones.length >= 2 ? `${zones[zones.length - 2]}-${zones[zones.length - 1]}` : null;
+  const matching = bigram ? topTrigrams.filter(([k]) => k.startsWith(bigram)) : [];
+  const patternNext = matching.length > 0 ? matching[0][0].split('-')[2] : null;
+  const patternConf = matching.length > 0 ? Math.min(matching[0][1] * 15, 92) : 0;
+
+  // 4-grams for deeper pattern
+  const fourgrams = {};
+  for (let i = 0; i < zones.length - 3; i++) {
+    const key = `${zones[i]}-${zones[i+1]}-${zones[i+2]}-${zones[i+3]}`;
+    fourgrams[key] = (fourgrams[key] || 0) + 1;
+  }
+  const topFourgrams = Object.entries(fourgrams).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  // ── 3. EMA momentum ───────────────────────────────────────────────────────
+  const ema5  = calcEMA(mults, 5);
+  const ema20 = calcEMA(mults, Math.min(20, mults.length));
+  const momentum = ema5 > ema20 ? 'bullish' : 'bearish';
+  const momentumStrength = ema20 > 0 ? Math.round(Math.abs(ema5 - ema20) / ema20 * 100) : 0;
+
+  // ── 4. Streak analysis ────────────────────────────────────────────────────
+  const lastZ = zones[zones.length - 1];
+  const streakType = lastZ <= 'B' ? 'low' : 'high';
+  let streak = 1;
+  for (let i = zones.length - 2; i >= 0; i--) {
+    const isLow = zones[i] <= 'B';
+    if ((streakType === 'low' && isLow) || (streakType === 'high' && !isLow)) streak++;
+    else break;
+  }
+
+  // ── 5. Zone frequency in last 20 rounds ──────────────────────────────────
+  const last20zones = zones.slice(-20);
+  const zoneFreq = {};
+  for (const z of ZONES) zoneFreq[z] = Math.round((last20zones.filter(x => x === z).length / last20zones.length) * 100);
+
+  // ── 6. Regression — linear trend slope on last 10 rounds ─────────────────
+  const last10 = mults.slice(-10);
+  const n = last10.length;
+  const xs = last10.map((_, i) => i);
+  const sumX = xs.reduce((a, b) => a + b, 0);
+  const sumY = last10.reduce((a, b) => a + b, 0);
+  const sumXY = xs.reduce((s, x, i) => s + x * last10[i], 0);
+  const sumX2 = xs.reduce((s, x) => s + x * x, 0);
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX) || 0;
+
+  // ── 7. Composite AI prediction ────────────────────────────────────────────
+  // Weighted vote: Markov (40%) + Pattern (35%) + Momentum (25%)
+  const votes = {};
+  for (const z of ZONES) votes[z] = 0;
+  // Markov votes
+  for (const [z, p] of Object.entries(nextProbs)) votes[z] += p * 0.40;
+  // Pattern vote
+  if (patternNext) votes[patternNext] += patternConf * 0.35;
+  // Momentum: if bullish, up-weight C/D/E; if bearish, up-weight A/B
+  if (momentum === 'bullish') {
+    votes['C'] += 8; votes['D'] += 10; votes['E'] += 5;
+  } else {
+    votes['A'] += 8; votes['B'] += 10;
+  }
+  const topVote = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+  const compositeConf = totalVotes > 0 ? Math.min(Math.round((topVote[1] / totalVotes) * 100), 91) : 50;
+
+  // ── 8. Anomaly detection ──────────────────────────────────────────────────
+  const mean = mults.reduce((a, b) => a + b, 0) / mults.length;
+  const variance = mults.reduce((s, x) => s + (x - mean) ** 2, 0) / mults.length;
+  const stdDev = Math.sqrt(variance);
+  const last5 = mults.slice(-5);
+  const anomalies = last5.filter(m => Math.abs(m - mean) > 2 * stdDev);
+
+  return {
+    markov: {
+      current: lastZone,
+      currentLabel: ZONE_LABELS[lastZone],
+      transitions: nextProbs,
+      bestNext: { zone: bestNext[0], label: ZONE_LABELS[bestNext[0]], pct: bestNext[1] },
+    },
+    pattern: {
+      bigram,
+      patternNext,
+      patternNextLabel: patternNext ? ZONE_LABELS[patternNext] : null,
+      patternConf,
+      topPatterns: topTrigrams.slice(0, 4).map(([key, count]) => ({
+        sequence: key.split('-').map(z => ZONE_LABELS[z]).join(' → '),
+        zones: key.split('-'),
+        count,
+        pct: Math.round((count / (zones.length - 2)) * 100),
+      })),
+      deepPatterns: topFourgrams.slice(0, 3).map(([key, count]) => ({
+        sequence: key.split('-').map(z => ZONE_LABELS[z]).join(' → '),
+        count,
+      })),
+    },
+    momentum: {
+      ema5:  Math.round(ema5  * 100) / 100,
+      ema20: Math.round(ema20 * 100) / 100,
+      trend: momentum,
+      strength: momentumStrength,
+      slope: Math.round(slope * 100) / 100,
+    },
+    streak: { type: streakType, count: streak },
+    zoneFreq,
+    anomalies: {
+      mean: Math.round(mean * 100) / 100,
+      stdDev: Math.round(stdDev * 100) / 100,
+      detected: anomalies.length > 0,
+      values: anomalies.map(m => Math.round(m * 100) / 100),
+    },
+    composite: {
+      zone: topVote[0],
+      label: ZONE_LABELS[topVote[0]],
+      confidence: compositeConf,
+      votes: Object.fromEntries(Object.entries(votes).map(([k, v]) => [k, Math.round(v)])),
+    },
+    zoneLabels: ZONE_LABELS,
+    basedOn: history.length,
+    generatedAt: formatTime(new Date()),
+  };
+}
+
 // ── Endpoints REST ────────────────────────────────────────────────────────────
 
 app.get('/api/luckyjet', (req, res) => {
@@ -623,6 +795,12 @@ app.get('/api/luckyjet', (req, res) => {
     current: currentCoeff != null ? { multiplier: currentCoeff } : null,
     total: history.length,
   });
+});
+
+app.get('/api/ai-analysis', (req, res) => {
+  const result = runAIAnalysis();
+  if (!result) return res.json({ error: 'Pas assez de données (minimum 5 tours)' });
+  res.json(result);
 });
 
 app.get('/api/luckyjet/current', (req, res) => {
