@@ -42,7 +42,8 @@ let B_TOKEN = loadGameToken();
 const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TG_ENABLED = !!TG_TOKEN;
-const APP_URL    = process.env.APP_URL || 'https://python-1--tvjqjzp7bw.replit.app';
+const APP_URL    = process.env.APP_URL ||
+  (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : 'https://python-1--tvjqjzp7bw.replit.app');
 
 // Subscriber list (persisted to disk)
 const SUBS_FILE = path.join(__dirname, 'subscribers.json');
@@ -1359,7 +1360,20 @@ app.listen(PORT, '0.0.0.0', () => {
   if (TG_ENABLED) {
     loadSubscribers();
     console.log(`[TG] Bot Telegram activé — ${subscribers.size} abonné(s)`);
+    console.log(`[TG] APP_URL = ${APP_URL}`);
     pollTelegramUpdates();
+    // Update menu button for ALL existing subscribers with the current APP_URL
+    setTimeout(async () => {
+      for (const [chatId] of subscribers) {
+        try {
+          await tgApi('setChatMenuButton', {
+            chat_id: chatId,
+            menu_button: { type: 'web_app', text: '🚀 Lucky Jet', web_app: { url: APP_URL } },
+          });
+        } catch (_) {}
+      }
+      console.log(`[TG] Boutons menu mis à jour pour ${subscribers.size} abonné(s) → ${APP_URL}`);
+    }, 2000);
     // Set the bot's command list (autocomplete in Telegram)
     tgApi('setMyCommands', {
       commands: [
