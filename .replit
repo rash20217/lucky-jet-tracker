@@ -11,9 +11,9 @@ language = "python3"
 requiredFiles = [".replit", "replit.nix"]
 
 [deployment]
-run = ["bash", "-c", "cd crash-tracker && node server/index.js"]
+run = ["bash", "-c", "cd crash-tracker && npm run server"]
 deploymentTarget = "vm"
-build = ["bash", "-c", "cd crash-tracker && npm install && npm run build"]
+build = ["bash", "-c", "cd crash-tracker && npm run build"]
 
 [agent]
 expertMode = true
