@@ -69,3 +69,8 @@ externalPort = 80
 [[ports]]
 localPort = 5001
 externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+APP_URL = "https://cd8c32e8-6a09-4052-90a4-6c71a632bc35-00-3r07wo2tgjwvu.janeway.replit.dev"
