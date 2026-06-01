@@ -162,8 +162,32 @@ async function handleTelegramUpdate(update) {
       console.log(`[TG] Abonné ${chatId} désinscrit — total: ${subscribers.size}`);
       await sendTelegramTo(chatId, '👋 Vous ne recevrez plus de prédictions. Tapez /start à tout moment pour vous réabonner.');
     }
+  } else if (text === '/signal' || text === '/ai' || text === '/analyse') {
+    const ai = runAIAnalysis();
+    if (!ai || !ai.series) {
+      await sendTelegramTo(chatId, '⏳ <b>Pas encore assez de données.</b>\n\nL\'IA a besoin d\'au moins 10 tours pour analyser les séries. Réessayez dans quelques secondes.');
+      return;
+    }
+    const msg = buildAISignalMessage(ai, 'signal');
+    await sendTelegramTo(chatId, msg, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '📊 Voir l\'appli complète', web_app: { url: APP_URL } }]],
+      },
+    });
+
   } else if (text === '/stats') {
-    await sendTelegramTo(chatId, `📊 <b>Stats du bot</b>\n\nAbonnés actifs : ${subscribers.size}\nTours en historique : ${history.length}\nPrédictions enregistrées : ${predictions.length}\nStatut connexion : ${wsStatus}`);
+    const ai = runAIAnalysis();
+    const aiLine = ai
+      ? `\n🤖 Signal IA : ${ai.series.signal} (${ai.series.signalConf}%) · Série : ${ai.series.currentRun.count} tours ${ai.series.currentRun.type === 'low' ? 'bas' : 'hauts'}`
+      : '';
+    await sendTelegramTo(chatId,
+      `📊 <b>Stats du bot</b>\n\n` +
+      `👥 Abonnés actifs : ${subscribers.size}\n` +
+      `📈 Tours en historique : ${history.length}\n` +
+      `🎯 Prédictions enregistrées : ${predictions.length}\n` +
+      `🌐 Statut connexion : ${wsStatus}` +
+      aiLine
+    );
 
   } else if (text.startsWith('/settoken')) {
     // Owner only
@@ -517,6 +541,126 @@ function addRound(multiplier) {
   currentRoundId = null;
   console.log(`[ROUND] #${round.id} — ${round.multiplier}x`);
   validatePredictions(round);
+  // Check if we should send an AI signal notification
+  if (history.length >= 10) checkAndSendAISignal();
+}
+
+// ── AI Signal Telegram notifications ─────────────────────────────────────────
+
+let lastAISignalTs        = 0;   // last time we sent a REBOND/REBOND FORT alert
+let lastWindowAlertTs     = 0;   // last time we sent a window-open alert
+let lastDrySpellAlertTs   = 0;   // last time we sent a critique dry-spell alert
+let windowWasOpenPrev     = false;
+
+const AI_SIGNAL_COOLDOWN_MS     = 5  * 60 * 1000;   // 5 min between REBOND FORT alerts
+const WINDOW_ALERT_COOLDOWN_MS  = 3  * 60 * 1000;   // 3 min between window alerts
+const DRYSPELL_COOLDOWN_MS      = 10 * 60 * 1000;   // 10 min between dry spell alerts
+
+function fmtDuration(ms) {
+  const totalSec = Math.abs(Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, '0')}s` : `${s}s`;
+}
+
+function buildAISignalMessage(ai, reason) {
+  const e  = ai.entry;
+  const sr = ai.series;
+  const run = sr.currentRun;
+
+  const EMOJIS = { 'REBOND FORT': '🔥', 'REBOND': '📈', 'PRUDENCE': '⚠️', 'EN ATTENTE': '⏳' };
+  const sigEmoji = EMOJIS[sr.signal] || '📡';
+
+  const urgencyEmoji = { IMMINENT: '🚨', 'EN RETARD': '⚠️', 'BIENTÔT': '⏰', 'EN ATTENTE': '⏳' }[e.urgency] || '📡';
+
+  // Multi-horizon probabilities
+  const h = sr.condHorizons || sr.horizons;
+  const probLine =
+    `  • Prochain : ≥2x <b>${h.next1.prob2x}%</b> · ≥5x <b>${h.next1.prob5x}%</b> · ≥10x <b>${h.next1.prob10x}%</b>\n` +
+    `  • 3 prochains : ≥5x <b>${h.next3.prob5x}%</b> · ≥10x <b>${h.next3.prob10x}%</b>`;
+
+  // Dry spell summary
+  const ds = sr.drySpell;
+  const dsLine =
+    `≥5x : ${ds.since5x.rounds} tours (${ds.since5x.status}) · ≥10x : ${ds.since10x.rounds} tours (${ds.since10x.status})`;
+
+  // Break stats
+  let breakLine = '';
+  if (sr.breakStats) {
+    breakLine = `\n🔮 Rupture attendue : <b>${sr.breakStats.expectedBreakLabel}</b> (moy. ${sr.breakStats.avgBreakValue}x · ${sr.breakStats.dataPoints} obs.)\n` +
+                `   Prob ≥2x: ${sr.breakStats.breakProb}% · ≥5x: ${sr.breakStats.pct5x}% · ≥10x: ${sr.breakStats.pct10x}%`;
+  }
+
+  // Cycle info
+  const cy10 = sr.cycles.c10x;
+  const cycLine = cy10
+    ? `\n🔄 Cycle 10x : toutes les ~${cy10.avg} tours · depuis <b>${cy10.roundsSince}</b> tours${cy10.due ? ' 🔴 <b>DÛ</b>' : ''}`
+    : '';
+
+  const header =
+    reason === 'window'
+      ? `🟢 <b>FENÊTRE D'ENTRÉE OUVERTE — ENTREZ MAINTENANT !</b>`
+      : reason === 'dryspell'
+      ? `⚠️ <b>SÉCHERESSE CRITIQUE DÉTECTÉE</b>`
+      : `${sigEmoji} <b>SIGNAL IA — ${sr.signal}</b>`;
+
+  return (
+    `${header}\n\n` +
+    `📊 <b>Série :</b> ${run.count} tours ${run.type === 'low' ? 'BAS' : 'HAUTS'} consécutifs (moy. ${run.avg}x)\n` +
+    `${breakLine}\n\n` +
+    `${urgencyEmoji} <b>Fenêtre d'entrée :</b> <b>${e.windowFrom} → ${e.windowTo}</b>\n` +
+    `🎯 <b>Cible :</b> ${e.target} attendue vers <b>${e.hitExpectedAt}</b>\n` +
+    `⚡ <b>Confiance :</b> ${e.confidence}%\n\n` +
+    `📈 <b>Probabilités (après série basse) :</b>\n${probLine}\n\n` +
+    `⏱ <b>Sécheresse :</b> ${dsLine}` +
+    `${cycLine}\n\n` +
+    `🏦 <b>Basé sur :</b> ${ai.basedOn} tours réels · <a href="${APP_URL}">Voir l'appli</a>`
+  );
+}
+
+async function checkAndSendAISignal() {
+  if (!TG_ENABLED || subscribers.size === 0) return;
+  const now = Date.now();
+
+  const ai = runAIAnalysis();
+  if (!ai || !ai.series) return;
+
+  const sr = ai.series;
+  const e  = ai.entry;
+
+  // ── 1. Window just opened alert ────────────────────────────────────────────
+  const windowOpen = e.msToWindowOpen <= 0 && e.msToWindowClose > 0;
+  if (windowOpen && !windowWasOpenPrev && (now - lastWindowAlertTs) > WINDOW_ALERT_COOLDOWN_MS) {
+    lastWindowAlertTs = now;
+    windowWasOpenPrev = true;
+    console.log('[AI-TG] 🟢 Fenêtre d\'entrée ouverte — notification envoyée');
+    await broadcastTelegram(buildAISignalMessage(ai, 'window'));
+    return;
+  }
+  if (!windowOpen) windowWasOpenPrev = false;
+
+  // ── 2. REBOND FORT / REBOND signal ────────────────────────────────────────
+  const isStrongSignal = sr.signal === 'REBOND FORT' && sr.currentRun.type === 'low' && sr.currentRun.count >= 3;
+  const isSignal       = sr.signal === 'REBOND'      && sr.currentRun.type === 'low' && sr.currentRun.count >= 4;
+
+  if ((isStrongSignal || isSignal) && (now - lastAISignalTs) > AI_SIGNAL_COOLDOWN_MS) {
+    lastAISignalTs = now;
+    console.log(`[AI-TG] ${sr.signal} signal — ${sr.currentRun.count} tours bas — notification envoyée`);
+    await broadcastTelegram(buildAISignalMessage(ai, 'signal'));
+    return;
+  }
+
+  // ── 3. Critical dry spell alert ────────────────────────────────────────────
+  const criticalDrySpell =
+    sr.drySpell.since10x.status === 'critique' ||
+    (sr.drySpell.since5x.status === 'critique' && sr.drySpell.since10x.status === 'élevé');
+
+  if (criticalDrySpell && (now - lastDrySpellAlertTs) > DRYSPELL_COOLDOWN_MS) {
+    lastDrySpellAlertTs = now;
+    console.log(`[AI-TG] Sécheresse critique ≥10x: ${sr.drySpell.since10x.rounds} tours — notification envoyée`);
+    await broadcastTelegram(buildAISignalMessage(ai, 'dryspell'));
+    return;
+  }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -1220,15 +1364,20 @@ app.listen(PORT, '0.0.0.0', () => {
     tgApi('setMyCommands', {
       commands: [
         { command: 'start',    description: "S'abonner et ouvrir l'application" },
-        { command: 'stop',     description: 'Se désabonner des prédictions' },
-        { command: 'stats',    description: 'Voir les stats du bot' },
+        { command: 'stop',     description: 'Se désabonner des notifications' },
+        { command: 'signal',   description: '🤖 Voir le signal IA en temps réel' },
+        { command: 'ai',       description: '🤖 Analyse IA complète (alias /signal)' },
+        { command: 'stats',    description: '📊 Stats du bot et de la connexion' },
         { command: 'settoken', description: '(Admin) Mettre à jour le token de connexion' },
       ],
     });
     sendTelegram(
       `🤖 <b>Lucky Jet Tracker reconnecté</b>\n\n` +
-      `Le bot est prêt à envoyer les prochaines prédictions.\n` +
-      `Bonne chance ! 🚀`
+      `Le bot envoie maintenant les signaux IA automatiquement :\n` +
+      `🔥 <b>REBOND FORT</b> — série de tours bas détectée\n` +
+      `🟢 <b>Fenêtre ouverte</b> — moment d'entrer !\n` +
+      `⚠️ <b>Sécheresse critique</b> — trop longtemps sans gros hit\n\n` +
+      `Tapez /signal pour l'analyse IA en direct. Bonne chance ! 🚀`
     );
   } else {
     console.log(`[TG] Bot Telegram désactivé (TELEGRAM_BOT_TOKEN manquant)`);
