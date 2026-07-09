@@ -38,6 +38,23 @@ function saveGameToken(token) {
 
 let B_TOKEN = loadGameToken();
 
+// Cross-server relay (Replit → Railway)
+const PUSH_TARGET_URL = process.env.PUSH_TARGET_URL || '';
+const SYNC_SECRET     = process.env.SYNC_SECRET || 'lj-sync-2026';
+const IS_PRIMARY      = !!PUSH_TARGET_URL;
+
+async function pushRoundToRemote(round) {
+  if (!PUSH_TARGET_URL) return;
+  try {
+    await fetch(PUSH_TARGET_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sync-Secret': SYNC_SECRET },
+      body: JSON.stringify({ round }),
+      signal: AbortSignal.timeout(4000),
+    });
+  } catch { /* Railway down — silent */ }
+}
+
 // Telegram
 const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -541,6 +558,7 @@ function addRound(multiplier) {
   currentCoeff = null;
   currentRoundId = null;
   console.log(`[ROUND] #${round.id} — ${round.multiplier}x`);
+  if (IS_PRIMARY) pushRoundToRemote(round);
   validatePredictions(round);
   // Check if we should send an AI signal notification
   if (history.length >= 10) checkAndSendAISignal();
@@ -1315,7 +1333,24 @@ app.get('/api/luckyjet/current', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, wsStatus, historySize: history.length });
+  res.json({ ok: true, wsStatus, historySize: history.length, isPrimary: IS_PRIMARY });
+});
+
+app.post('/api/ingest-round', (req, res) => {
+  const secret = req.headers['x-sync-secret'];
+  if (secret !== SYNC_SECRET) return res.status(403).json({ error: 'Unauthorized' });
+  const { round } = req.body;
+  if (!round || typeof round.multiplier !== 'number') return res.status(400).json({ error: 'Invalid round' });
+  if (history.some(r => r.roundId && r.roundId === round.roundId)) {
+    return res.json({ ok: true, duplicate: true });
+  }
+  const ingested = { ...round, source: 'LIVE' };
+  history.unshift(ingested);
+  if (history.length > MAX_HISTORY) history.pop();
+  console.log(`[SYNC] ← Round reçu de Replit: ${round.multiplier}x`);
+  validatePredictions(ingested);
+  if (history.length >= 10) checkAndSendAISignal();
+  res.json({ ok: true });
 });
 
 app.get('/api/predictions', (req, res) => {
