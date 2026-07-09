@@ -5,7 +5,7 @@ interface Props {
 }
 
 export default function RoundTable({ rounds }: Props) {
-  const recent = rounds.slice(-10).reverse();
+  const recent = rounds.slice(0, 10);
 
   function getMultiplierColor(mult: number): string {
     if (mult < 2) return '#e07030';
