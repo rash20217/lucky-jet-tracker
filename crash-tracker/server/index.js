@@ -19,7 +19,7 @@ const MAX_HISTORY  = 100;
 
 // Game token — chargé depuis fichier, env, ou valeur par défaut
 const TOKEN_FILE = path.join(__dirname, 'game-token.json');
-const TOKEN_DEFAULT = process.env.GAME_TOKEN || '43902aeaf456d9783e548073407c9966192027c9c638b1ca4ad3d8714b08e868b91283398cea8e4a6e09dbc2a72bb456e13703bf68c71e7a3ccc278fc1cfa343184c7ff1cf0929af9cfce9ea32b527c6ec5d1bed8fba0ad368dd8f1bdeed2c767d03c6a9a802e54eb844d895c622a90e67ffebf01d3b94b23e4ceb675d51f8f5f84f01de038b84d58dae795121f0545ffd73b083fb9ba3209e6085db.d3bd3e087e2b9dfc46f3e9c9769003e2.077dee8d-c923-4c02-9bee-757573662e69';
+const TOKEN_DEFAULT = process.env.GAME_TOKEN || '080796f3448ec56d4641ffada95aa2ecb7d736c56c5033b5db14b8d0cb00a6dfbc1927005cda122b1ecda66e2b60b620248ef71206b4f3cf96b79a9f5fc5e9f65384e2c3d3d193b69f522781c50b0966aa5004cc0e3dbef3fecb60860f1867de4dbebc77b71e45ec8a5f021b51115acf540f5140c3d1948a84e522ed1670721b0e21c04a6a6f459c1f23e99bcb09291e291e572d4bbdb887b880374be7.2e8ce06715e61249ae982c4e2222062a.077dee8d-c923-4c02-9bee-757573662e69';
 
 function loadGameToken() {
   try {
