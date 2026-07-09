@@ -43,7 +43,7 @@ const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TG_ENABLED = !!TG_TOKEN;
 const APP_URL    = process.env.APP_URL ||
-  (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : 'https://python-1--tvjqjzp7bw.replit.app');
+  (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : 'https://lucky-jet-tracker-production.up.railway.app');
 
 // Subscriber list (persisted to disk)
 const SUBS_FILE = path.join(__dirname, 'subscribers.json');
