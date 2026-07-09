@@ -1,0 +1,8 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "cd crash-tracker && npm install && npm run build"
+
+[deploy]
+startCommand = "cd crash-tracker && node server/index.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
