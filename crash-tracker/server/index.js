@@ -42,6 +42,7 @@ let B_TOKEN = loadGameToken();
 const PUSH_TARGET_URL = process.env.PUSH_TARGET_URL || '';
 const SYNC_SECRET     = process.env.SYNC_SECRET || 'lj-sync-2026';
 const IS_PRIMARY      = !!PUSH_TARGET_URL;
+const DISABLE_WS      = process.env.DISABLE_WS === 'true'; // Railway: désactive son propre WS
 
 async function pushRoundToRemote(round) {
   if (!PUSH_TARGET_URL) return;
@@ -758,6 +759,11 @@ function scheduleReconnect(delay = reconnectDelay) {
 }
 
 async function startConnection() {
+  if (DISABLE_WS) {
+    wsStatus = 'relay_mode';
+    console.log('[WS] Mode relais actif — WebSocket désactivé, données reçues de Replit');
+    return;
+  }
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectDelay = 5000; // reset on each manual call
   try {
@@ -1333,7 +1339,7 @@ app.get('/api/luckyjet/current', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, wsStatus, historySize: history.length, isPrimary: IS_PRIMARY });
+  res.json({ ok: true, wsStatus, historySize: history.length, isPrimary: IS_PRIMARY, relayMode: DISABLE_WS });
 });
 
 app.post('/api/ingest-round', (req, res) => {
