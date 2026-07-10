@@ -573,78 +573,182 @@ function processMessage(raw) {
   }
 }
 
-// Formules candidates à tester — la meilleure est sélectionnée automatiquement via pfPairs
-const PF_FORMULAS = {
-  // Formule BGaming / SmartSoft standard (13 hex, 2^52, 6% house edge)
-  bgaming52: (seed) => {
-    const h = parseInt(seed.slice(0, 13), 16);
-    const e = Math.pow(2, 52);
-    if (h % 15 === 0) return 1.0;
-    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
-  },
-  // Formule 32-bit (8 hex, 2^32)
-  standard32: (seed) => {
-    const h = parseInt(seed.slice(0, 8), 16);
-    const e = 0x100000000;
-    if (h % 33 === 0) return 1.0;
-    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
-  },
-  // Formule via SHA256 du digest
-  sha256_52: (seed) => {
-    const derived = crypto.createHash('sha256').update(seed).digest('hex');
-    const h = parseInt(derived.slice(0, 13), 16);
-    const e = Math.pow(2, 52);
-    if (h % 15 === 0) return 1.0;
-    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
-  },
-  // Formule Aviator-like: HMAC-SHA256(serverSeed, "0")
-  hmac32: (seed) => {
-    try {
-      const hmac = crypto.createHmac('sha256', seed);
-      hmac.update('0');
-      const h = parseInt(hmac.digest('hex').slice(0, 8), 16);
-      const e = 0x100000000;
-      if (h % 33 === 0) return 1.0;
-      return Math.max(1.0, Math.floor(e / (e - h) * 100) / 100);
-    } catch { return null; }
-  },
+// ══════════════════════════════════════════════════════════════════════════════
+// MOTEUR D'APPRENTISSAGE PF — s'améliore automatiquement avec les données live
+// ══════════════════════════════════════════════════════════════════════════════
+
+// État global de l'apprentissage
+const pfLearn = {
+  // Meilleure fenêtre trouvée: { offset, len, edge, inverted, score, sampleSize }
+  bestWindow: null,
+  // Scores par (offset,len,edge) pour visualisation
+  windowScores: {},
+  // Analyse de zones: corrélation hash-segment → crash zone
+  zoneModel: null,
+  // Dernière mise à jour
+  lastCalibrated: 0,
 };
 
-let bestFormula = 'bgaming52'; // mis à jour automatiquement
+// Formules de transformation h → crash (h normalisé entre 0 et 1)
+const TRANSFORMS = [
+  { name: 'k/(k-h)', fn: (h, edge) => Math.max(1.0, Math.floor((1-edge) / (1-h) * 100) / 100) },
+  { name: 'inv_h',   fn: (h, edge) => Math.max(1.0, Math.floor((1-edge) * (1/(1-h)) * 100) / 100) },
+  { name: 'exp_h',   fn: (h, edge) => Math.max(1.0, Math.floor((1-edge) * Math.exp(h * 2.3) * 100) / 100) },
+];
+const EDGES = [0.03, 0.06, 0.10]; // house edge à tester
+const WIN_LENS = [8, 13, 16];     // longueur de fenêtre en hex chars
 
-function selectBestFormula() {
-  if (pfPairs.length < 3) return;
-  let best = null, bestScore = -1;
-  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
-    let score = 0;
-    for (const { seed, multiplier } of pfPairs) {
-      if (!seed) continue;
-      try {
-        const pred = fn(seed);
-        if (pred == null) continue;
-        const diff = Math.abs(pred - multiplier) / multiplier;
-        if (diff < 0.10) score++;
-      } catch { /* skip */ }
-    }
-    if (score > bestScore) { bestScore = score; best = name; }
-  }
-  if (best) bestFormula = best;
+// Extrait une valeur normalisée [0,1) depuis une fenêtre du hash
+function extractNorm(hash, offset, len) {
+  if (!hash || offset + len > hash.length) return null;
+  const slice = hash.slice(offset, offset + len);
+  // Utiliser BigInt pour éviter les dépassements sur 52+ bits
+  const maxVal = BigInt(16) ** BigInt(len);
+  const h = BigInt('0x' + slice);
+  return Number(h) / Number(maxVal);
 }
 
-function hashToCrashPoint(seed) {
-  if (!seed || seed.length < 8) return null;
+// Calcule le crash prédit pour une config (offset, len, edge, transformIdx)
+function predictWithConfig(hash, offset, len, edge, transformIdx) {
+  const norm = extractNorm(hash, offset, len);
+  if (norm == null || norm >= 1) return null;
   try {
-    return PF_FORMULAS[bestFormula]?.(seed) ?? null;
+    return TRANSFORMS[transformIdx].fn(norm, edge);
   } catch { return null; }
 }
 
-function hashToCrashPointAll(seed) {
-  if (!seed || seed.length < 8) return {};
-  const results = {};
-  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
-    try { results[name] = fn(seed); } catch { results[name] = null; }
+// Lance la calibration complète sur toutes les paires accumulées
+function calibratePF() {
+  if (pfPairs.length < 5) return;
+  const pairs = pfPairs.slice(0, 100); // max 100 dernières paires
+  const hashLen = pairs[0]?.seed?.length || 0;
+  if (hashLen < 8) return;
+
+  let globalBest = { score: -1, within25: 0 };
+
+  // Scan de toutes les fenêtres possibles
+  for (const len of WIN_LENS) {
+    for (let offset = 0; offset <= hashLen - len; offset += 2) {
+      for (let ti = 0; ti < TRANSFORMS.length; ti++) {
+        for (const edge of EDGES) {
+          let hits10 = 0, hits25 = 0, tested = 0;
+          for (const { seed, multiplier } of pairs) {
+            if (!seed) continue;
+            const pred = predictWithConfig(seed, offset, len, edge, ti);
+            if (pred == null) continue;
+            tested++;
+            const diff = Math.abs(pred - multiplier) / multiplier;
+            if (diff < 0.10) hits10++;
+            if (diff < 0.25) hits25++;
+          }
+          if (tested === 0) continue;
+          const score10 = hits10 / tested;
+          const score25 = hits25 / tested;
+          const key = `${offset}_${len}_${ti}_${edge}`;
+          pfLearn.windowScores[key] = { offset, len, edge, ti, score10: Math.round(score10*100), score25: Math.round(score25*100), tested };
+
+          if (score10 > globalBest.score || (score10 === globalBest.score && score25 > globalBest.within25)) {
+            globalBest = { score: score10, within25: score25, offset, len, edge, ti, tested };
+          }
+        }
+      }
+    }
   }
-  return results;
+
+  if (globalBest.score >= 0) {
+    pfLearn.bestWindow = globalBest;
+    pfLearn.lastCalibrated = Date.now();
+    console.log(`[PF-LEARN] Best window: offset=${globalBest.offset} len=${globalBest.len} edge=${globalBest.edge} transform=${TRANSFORMS[globalBest.ti].name} score=${Math.round(globalBest.score*100)}% (${globalBest.tested} rounds)`);
+  }
+
+  // Modèle de zones basé sur le segment le plus discriminant
+  buildZoneModel(pairs);
+}
+
+// Modèle de zones: apprend dans quelle zone de crash tombe chaque hash-segment
+function buildZoneModel(pairs) {
+  if (pairs.length < 10) return;
+  const best = pfLearn.bestWindow;
+  if (!best) return;
+
+  // 8 buckets de 0 à 1 normalisés
+  const buckets = Array.from({ length: 8 }, () => ({ count: 0, totalCrash: 0, crashZones: [0, 0, 0, 0] }));
+  // zones: 0=<2x, 1=2-5x, 2=5-10x, 3=>10x
+
+  for (const { seed, multiplier } of pairs) {
+    const norm = extractNorm(seed, best.offset, best.len);
+    if (norm == null) continue;
+    const bucket = Math.min(7, Math.floor(norm * 8));
+    buckets[bucket].count++;
+    buckets[bucket].totalCrash += multiplier;
+    const zone = multiplier < 2 ? 0 : multiplier < 5 ? 1 : multiplier < 10 ? 2 : 3;
+    buckets[bucket].crashZones[zone]++;
+  }
+
+  pfLearn.zoneModel = buckets.map((b, i) => ({
+    bucket: i,
+    normRange: [i/8, (i+1)/8],
+    avgCrash: b.count > 0 ? Math.round(b.totalCrash / b.count * 100) / 100 : null,
+    count: b.count,
+    dominantZone: b.count > 0 ? b.crashZones.indexOf(Math.max(...b.crashZones)) : null,
+    crashZones: b.crashZones,
+  }));
+}
+
+// Prédit le crash pour un hash donné (utilise le meilleur modèle appris)
+function hashToCrashPoint(hash) {
+  if (!hash || hash.length < 8) return null;
+  const w = pfLearn.bestWindow;
+  if (!w) {
+    // Fallback: premier offset avec len=8, edge=6%
+    const norm = extractNorm(hash, 0, 8);
+    if (norm == null || norm >= 1) return null;
+    return Math.max(1.0, Math.floor((1-0.06) / (1-norm) * 100) / 100);
+  }
+  return predictWithConfig(hash, w.offset, w.len, w.edge, w.ti);
+}
+
+// Prédit la zone (pour le component: retourne infos enrichies)
+function hashToPrediction(hash) {
+  if (!hash || hash.length < 8) return null;
+  const value = hashToCrashPoint(hash);
+  const w = pfLearn.bestWindow;
+  if (!value || !w) return { value, zone: null, confidence: 'low', zoneInfo: null };
+
+  const norm = extractNorm(hash, w.offset, w.len);
+  const zoneInfo = pfLearn.zoneModel
+    ? pfLearn.zoneModel.find(b => norm >= b.normRange[0] && norm < b.normRange[1])
+    : null;
+
+  const sampleSize = pfPairs.length;
+  const confidence = sampleSize >= 50 && w.score >= 0.25 ? 'high'
+    : sampleSize >= 20 && w.score >= 0.15 ? 'medium'
+    : 'low';
+
+  return { value, zone: zoneInfo?.dominantZone ?? null, confidence, zoneInfo, norm: Math.round(norm * 100) / 100 };
+}
+
+// Expose un résumé du meilleur état d'apprentissage pour l'API
+function getPFLearnSummary() {
+  const w = pfLearn.bestWindow;
+  const topN = Object.values(pfLearn.windowScores)
+    .sort((a, b) => b.score10 - a.score10)
+    .slice(0, 5);
+  return {
+    sampleSize: pfPairs.length,
+    calibrated: !!w,
+    bestWindow: w ? {
+      offset: w.offset,
+      len: w.len,
+      edge: w.edge,
+      transform: TRANSFORMS[w.ti]?.name,
+      score10: Math.round(w.score * 100),
+      score25: Math.round(w.within25 * 100),
+    } : null,
+    topWindows: topN,
+    zoneModelReady: !!pfLearn.zoneModel,
+    lastCalibrated: pfLearn.lastCalibrated,
+  };
 }
 
 function addRound(multiplier) {
@@ -659,18 +763,23 @@ function addRound(multiplier) {
     source: 'LIVE',
     timestamp: Date.now(),
   };
-  // Accumuler les paires (seed, multiplier) pour calibrer la meilleure formule
-  if (currentRoundDigest || currentRoundHash) {
-    pfPairs.unshift({ seed: currentRoundDigest || currentRoundHash, multiplier: round.multiplier });
-    if (pfPairs.length > 50) pfPairs.pop();
-    if (pfPairs.length >= 3) selectBestFormula();
+  // Accumuler les paires (hash, multiplier) pour le moteur d'apprentissage
+  const seed = currentRoundDigest || currentRoundHash;
+  if (seed) {
+    pfPairs.unshift({ seed, multiplier: round.multiplier });
+    if (pfPairs.length > 200) pfPairs.pop();
+    // Calibration: chaque round, tous les 5 rounds après les 5 premiers
+    if (pfPairs.length >= 5 && (pfPairs.length <= 20 || pfPairs.length % 5 === 0)) {
+      setImmediate(calibratePF);
+    }
   }
   history.unshift(round);
   if (history.length > MAX_HISTORY) history.pop();
-  currentCoeff  = null;
+  currentCoeff       = null;
   currentRoundId     = null;
   currentRoundDigest = null;
-  console.log(`[ROUND] #${round.id} — ${round.multiplier}x formula:${bestFormula}`);
+  const learned = pfLearn.bestWindow;
+  console.log(`[ROUND] #${round.id} — ${round.multiplier}x | PF pairs:${pfPairs.length} bestScore:${learned ? Math.round(learned.score*100)+'%' : 'n/a'}`);
   if (IS_PRIMARY) pushRoundToRemote(round);
   validatePredictions(round);
   // Check if we should send an AI signal notification
@@ -1458,22 +1567,14 @@ app.get('/api/luckyjet/current', (req, res) => {
 });
 
 app.get('/api/pf-prediction', (req, res) => {
-  // Prédiction du round courant (seed révélé → hash suivant)
-  const predSeed = currentRoundDigest
-    ? crypto.createHash('sha512').update(currentRoundDigest).digest('hex') // next seed via chain
-    : currentRoundHash;
-  const currentPred = hashToCrashPoint(predSeed || currentRoundHash);
+  const hash = currentRoundHash;
+  const pred = hash ? hashToPrediction(hash) : null;
+  const learn = getPFLearnSummary();
 
-  // Toutes les formules sur le seed courant
-  const allFormulas = predSeed ? hashToCrashPointAll(predSeed) : {};
+  // Vérification chaîne
+  const chainValid = (lastEndHash && hash) ? lastEndHash === hash : null;
 
-  // Vérification chaîne hash: SHA512(lastEndHash) devrait == currentRoundHash
-  let chainValid = null;
-  if (lastEndHash && currentRoundHash) {
-    chainValid = lastEndHash === currentRoundHash;
-  }
-
-  // Accuracy sur les paires collectées
+  // Accuracy sur l'historique (prédictions stockées)
   let exact = 0, close10 = 0, close25 = 0;
   const withPred = history.filter(r => r.pfPrediction != null);
   for (const r of withPred) {
@@ -1484,42 +1585,39 @@ app.get('/api/pf-prediction', (req, res) => {
   }
   const total = withPred.length;
 
-  // Calibration — scores par formule
-  const formulaScores = {};
-  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
-    let score = 0, tested = 0;
-    for (const { seed, multiplier } of pfPairs) {
-      if (!seed) continue;
-      try {
-        const p = fn(seed);
-        if (p == null) continue;
-        tested++;
-        const diff = Math.abs(p - multiplier) / multiplier;
-        if (diff < 0.10) score++;
-      } catch { /* skip */ }
-    }
-    formulaScores[name] = tested > 0 ? Math.round(score / tested * 100) : 0;
-  }
+  // Zone model pour le frontend
+  const zoneModel = pfLearn.zoneModel?.map(b => ({
+    range: `${Math.round(b.normRange[0]*100)}-${Math.round(b.normRange[1]*100)}%`,
+    avgCrash: b.avgCrash,
+    count: b.count,
+    pctLow: b.count > 0 ? Math.round(b.crashZones[0] / b.count * 100) : 0,
+    pctMid: b.count > 0 ? Math.round(b.crashZones[1] / b.count * 100) : 0,
+    pctHigh: b.count > 0 ? Math.round((b.crashZones[2] + b.crashZones[3]) / b.count * 100) : 0,
+  })) ?? null;
 
   res.json({
-    currentHash: currentRoundHash,
-    currentPrediction: currentPred,
-    allFormulas,
-    bestFormula,
+    currentHash: hash,
+    currentPrediction: pred?.value ?? null,
+    predictionZone: pred?.zone ?? null,
+    predictionNorm: pred?.norm ?? null,
+    confidence: pred?.confidence ?? 'low',
     chainValid,
     hasDigest: !!currentRoundDigest,
+    learn,
     accuracy: total > 0 ? {
       exact: Math.round(exact / total * 100),
       within10pct: Math.round(close10 / total * 100),
       within25pct: Math.round(close25 / total * 100),
       sampleSize: total,
     } : null,
-    formulaScores,
+    zoneModel,
     recentPairs: withPred.slice(0, 10).map(r => ({
       hash: (r.pfDigest || r.hashSeed)?.slice(0, 16) + '…',
       predicted: r.pfPrediction,
       actual: r.multiplier,
-      diff: r.pfPrediction != null ? Math.round(Math.abs(r.pfPrediction - r.multiplier) / r.multiplier * 100) + '%' : '?',
+      diff: r.pfPrediction != null
+        ? Math.round(Math.abs(r.pfPrediction - r.multiplier) / r.multiplier * 100) + '%'
+        : '?',
     })),
   });
 });
