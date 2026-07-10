@@ -3,12 +3,17 @@ import { useState, useEffect } from 'react';
 interface PFData {
   currentHash: string | null;
   currentPrediction: number | null;
+  bestFormula: string;
+  chainValid: boolean | null;
+  hasDigest: boolean;
+  allFormulas: { [key: string]: number | null };
   accuracy: {
     exact: number;
     within10pct: number;
     within25pct: number;
     sampleSize: number;
   } | null;
+  formulaScores: { [key: string]: number };
   recentPairs: {
     hash: string;
     predicted: number;
@@ -17,9 +22,16 @@ interface PFData {
   }[];
 }
 
+const FORMULA_LABELS: Record<string, string> = {
+  bgaming52: 'BGaming 52-bit',
+  standard32: 'Standard 32-bit',
+  sha256_52: 'SHA256→52-bit',
+  hmac32: 'HMAC 32-bit',
+};
+
 export default function PFPredictor() {
   const [data, setData] = useState<PFData | null>(null);
-  const [showPairs, setShowPairs] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
     async function fetchPF() {
@@ -35,25 +47,21 @@ export default function PFPredictor() {
 
   if (!data) return null;
 
-  const pred = data.currentPrediction;
   const acc = data.accuracy;
+  const bestScore = acc?.within10pct ?? 0;
+  const isCalibrating = !acc || acc.sampleSize < 10;
 
-  function predColor(v: number) {
-    if (v < 1.5) return '#e07030';
-    if (v < 2)   return '#f59e0b';
-    if (v < 5)   return '#6b7aff';
-    if (v < 10)  return '#4ade80';
-    return '#a855f7';
-  }
+  // Best formula score from formulaScores
+  const topScore = Math.max(0, ...Object.values(data.formulaScores));
 
-  function zone(v: number) {
-    if (v < 1.5) return 'A — Très bas';
-    if (v < 2)   return 'B — Bas';
-    if (v < 5)   return 'C — Moyen';
-    if (v < 10)  return 'D — Haut';
-    if (v < 50)  return 'E — Très haut';
-    return 'F — Extrême';
-  }
+  // Status interpretation
+  const status: 'calibrating' | 'learning' | 'active' = 
+    !acc || acc.sampleSize < 5   ? 'calibrating' :
+    topScore < 20                ? 'learning'    :
+    'active';
+
+  const statusColor = status === 'active' ? '#4ade80' : status === 'learning' ? '#f59e0b' : '#64748b';
+  const statusLabel = status === 'active' ? 'Actif' : status === 'learning' ? 'Apprentissage' : 'Calibration';
 
   return (
     <div style={{
@@ -63,179 +71,225 @@ export default function PFPredictor() {
       padding: '20px',
       marginBottom: '16px',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
-        <span style={{ fontSize: '20px' }}>🔐</span>
-        <div>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+        <span style={{ fontSize: '22px' }}>🔐</span>
+        <div style={{ flex: 1 }}>
           <div style={{ fontSize: '13px', fontWeight: 800, letterSpacing: '2px', color: '#e2e8f0' }}>
-            PROVABLY FAIR — PRÉDICTION RNG
+            PROVABLY FAIR
           </div>
           <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
-            Formule mathématique appliquée au hash SHA-512
+            Vérification + estimation RNG · Hash capturé à chaque round
           </div>
         </div>
-        {acc && (
-          <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-            <div style={{ fontSize: '11px', color: '#64748b' }}>Précision formule</div>
-            <div style={{ fontSize: '16px', fontWeight: 700, color: acc.within10pct > 50 ? '#4ade80' : '#f59e0b' }}>
-              {acc.within10pct}%
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          background: statusColor + '18',
+          border: `1px solid ${statusColor}44`,
+          borderRadius: '20px',
+          padding: '5px 12px',
+        }}>
+          <div style={{
+            width: '7px', height: '7px', borderRadius: '50%',
+            background: statusColor,
+            animation: status === 'calibrating' ? 'pulse 1.5s infinite' : 'none',
+          }} />
+          <span style={{ fontSize: '11px', color: statusColor, fontWeight: 700 }}>{statusLabel}</span>
+        </div>
+      </div>
+
+      {/* Hash + integrity row */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '10px',
+        marginBottom: '14px',
+      }}>
+        {/* Hash card */}
+        <div style={{ background: '#070c17', borderRadius: '10px', padding: '12px' }}>
+          <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '1px', marginBottom: '6px' }}>
+            HASH ROUND EN COURS
+          </div>
+          {data.currentHash ? (
+            <div style={{ fontSize: '10px', fontFamily: 'monospace', color: '#4ade80', wordBreak: 'break-all', lineHeight: 1.5 }}>
+              {data.currentHash.slice(0, 24)}…
             </div>
-            <div style={{ fontSize: '10px', color: '#64748b' }}>±10% sur {acc.sampleSize} tours</div>
+          ) : (
+            <div style={{ fontSize: '11px', color: '#3a4560' }}>En attente…</div>
+          )}
+        </div>
+
+        {/* Integrity card */}
+        <div style={{ background: '#070c17', borderRadius: '10px', padding: '12px' }}>
+          <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '1px', marginBottom: '6px' }}>
+            INTÉGRITÉ
+          </div>
+          <div style={{ fontSize: '12px', color: data.hasDigest ? '#4ade80' : '#64748b', fontWeight: 600, marginBottom: '4px' }}>
+            {data.hasDigest ? '✓ Digest vérifié' : '⏳ En attente digest'}
+          </div>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>
+            {data.chainValid === true && '✓ Chaîne hash valide'}
+            {data.chainValid === false && '● Hash indépendants'}
+            {data.chainValid === null && 'Analyse en cours…'}
+          </div>
+        </div>
+      </div>
+
+      {/* Formula calibration status */}
+      <div style={{
+        background: '#0a0f1c',
+        borderRadius: '10px',
+        padding: '14px',
+        marginBottom: '12px',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+          <div style={{ fontSize: '11px', color: '#64748b', letterSpacing: '1px' }}>
+            AUTO-CALIBRATION FORMULE RNG
+          </div>
+          <div style={{ fontSize: '11px', color: statusColor, fontWeight: 700 }}>
+            {acc ? `${acc.sampleSize} rounds analysés` : 'Démarrage…'}
+          </div>
+        </div>
+
+        {Object.entries(data.formulaScores).map(([name, score]) => (
+          <div key={name} style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            marginBottom: '6px',
+          }}>
+            <div style={{
+              fontSize: '11px',
+              color: name === data.bestFormula ? '#6b7aff' : '#64748b',
+              width: '130px',
+              flexShrink: 0,
+            }}>
+              {name === data.bestFormula ? '▶ ' : '  '}{FORMULA_LABELS[name] ?? name}
+            </div>
+            <div style={{
+              flex: 1,
+              background: '#111827',
+              borderRadius: '4px',
+              height: '6px',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                width: `${score}%`,
+                height: '100%',
+                background: score > 40 ? '#4ade80' : score > 20 ? '#6b7aff' : '#3a4560',
+                borderRadius: '4px',
+                transition: 'width 0.5s ease',
+              }} />
+            </div>
+            <div style={{ fontSize: '11px', color: '#e2e8f0', width: '30px', textAlign: 'right', fontWeight: score > 40 ? 700 : 400 }}>
+              {score}%
+            </div>
+          </div>
+        ))}
+
+        {topScore < 15 && acc && acc.sampleSize >= 5 && (
+          <div style={{
+            marginTop: '8px',
+            padding: '8px 12px',
+            background: '#f59e0b11',
+            border: '1px solid #f59e0b33',
+            borderRadius: '8px',
+            fontSize: '11px',
+            color: '#f59e0b',
+          }}>
+            ℹ️ Formule Lucky Jet non-standard détectée — analyse continue. Les prédictions ci-dessous sont des estimations statistiques.
           </div>
         )}
       </div>
 
-      {pred != null ? (
-        <div style={{
-          background: '#0a0f1c',
-          borderRadius: '12px',
-          padding: '18px',
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: '16px',
-          marginBottom: '14px',
-        }}>
-          <div>
-            <div style={{ fontSize: '11px', color: '#64748b', letterSpacing: '1px', marginBottom: '6px' }}>
-              CRASH PRÉDIT (RNG)
-            </div>
-            <div style={{ fontSize: '36px', fontWeight: 900, color: predColor(pred) }}>
-              {pred.toFixed(2)}x
-            </div>
-            <div style={{
-              display: 'inline-block',
-              background: predColor(pred) + '22',
-              border: `1px solid ${predColor(pred)}44`,
-              borderRadius: '8px',
-              padding: '3px 10px',
-              fontSize: '11px',
-              color: predColor(pred),
-              fontWeight: 700,
-              marginTop: '4px',
-            }}>
-              Zone {zone(pred)}
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: '11px', color: '#64748b', letterSpacing: '1px', marginBottom: '8px' }}>
-              INTERPRÉTATION
-            </div>
-            <div style={{ fontSize: '13px', color: '#e2e8f0', lineHeight: '1.6' }}>
-              {pred < 1.5 && <>⚠️ Crash imminent probable<br />Ne pas miser</>}
-              {pred >= 1.5 && pred < 2 && <>🟡 Crash bas attendu<br />Viser retrait à <b>1.3x</b></>}
-              {pred >= 2 && pred < 5 && <>🔵 Tour correct attendu<br />Viser retrait à <b>{(pred * 0.7).toFixed(2)}x</b></>}
-              {pred >= 5 && pred < 10 && <>🟢 Bon multiplicateur prévu<br />Viser retrait à <b>{(pred * 0.65).toFixed(2)}x</b></>}
-              {pred >= 10 && <>🟣 Grand multiplicateur prévu!<br />Stratégie <b>retrait progressif</b></>}
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div style={{
-          background: '#0a0f1c',
-          borderRadius: '12px',
-          padding: '16px',
-          textAlign: 'center',
-          color: '#64748b',
-          marginBottom: '14px',
-        }}>
-          En attente du prochain round…
-        </div>
-      )}
-
-      {data.currentHash && (
+      {/* Prediction (best effort) */}
+      {data.currentPrediction != null && (
         <div style={{
           background: '#070c17',
-          borderRadius: '8px',
-          padding: '10px 14px',
-          marginBottom: '14px',
+          borderRadius: '10px',
+          padding: '14px',
+          marginBottom: '12px',
           display: 'flex',
           alignItems: 'center',
-          gap: '8px',
+          gap: '14px',
         }}>
-          <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>HASH:</span>
-          <span style={{
-            fontSize: '10px',
-            fontFamily: 'monospace',
-            color: '#4ade80',
-            wordBreak: 'break-all',
-            opacity: 0.8,
-          }}>
-            {data.currentHash.slice(0, 32)}…
-          </span>
+          <div>
+            <div style={{ fontSize: '10px', color: '#64748b', letterSpacing: '1px', marginBottom: '4px' }}>
+              ESTIMATION ({FORMULA_LABELS[data.bestFormula]?.split(' ')[0] ?? 'Formule'} {data.formulaScores[data.bestFormula] ?? 0}%)
+            </div>
+            <div style={{
+              fontSize: '28px',
+              fontWeight: 900,
+              color: data.currentPrediction < 2 ? '#f59e0b' : data.currentPrediction < 5 ? '#6b7aff' : '#4ade80',
+            }}>
+              ~{data.currentPrediction.toFixed(2)}x
+            </div>
+          </div>
+          <div style={{ flex: 1, fontSize: '11px', color: '#64748b', lineHeight: 1.7 }}>
+            {isCalibrating && <span style={{ color: '#f59e0b' }}>⚙ Précision formule en cours d'évaluation<br /></span>}
+            Confiance: <b style={{ color: topScore > 30 ? '#4ade80' : '#f59e0b' }}>{topScore > 30 ? 'Modérée' : topScore > 15 ? 'Faible' : 'Très faible'}</b>
+            {acc && <><br />Accuracy ±10%: <b style={{ color: '#e2e8f0' }}>{acc.within10pct}%</b> / {acc.sampleSize} tours</>}
+          </div>
         </div>
       )}
 
-      {acc && acc.sampleSize > 0 && (
+      {/* Toggle recent pairs */}
+      {data.recentPairs.length > 0 && (
         <>
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr 1fr',
-            gap: '8px',
-            marginBottom: '12px',
-          }}>
-            {[
-              { label: 'Exact (±1%)', val: acc.exact, color: '#4ade80' },
-              { label: 'Proche (±10%)', val: acc.within10pct, color: '#6b7aff' },
-              { label: 'Approx (±25%)', val: acc.within25pct, color: '#f59e0b' },
-            ].map(s => (
-              <div key={s.label} style={{
-                background: '#0a0f1c',
-                borderRadius: '8px',
-                padding: '10px',
-                textAlign: 'center',
-              }}>
-                <div style={{ fontSize: '20px', fontWeight: 700, color: s.color }}>{s.val}%</div>
-                <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>{s.label}</div>
-              </div>
-            ))}
-          </div>
-
           <button
-            onClick={() => setShowPairs(p => !p)}
+            onClick={() => setShowDetails(p => !p)}
             style={{
               background: 'none',
-              border: '1px solid #2a3a5c',
+              border: '1px solid #1e2535',
               borderRadius: '8px',
               color: '#64748b',
-              fontSize: '12px',
+              fontSize: '11px',
               padding: '6px 14px',
               cursor: 'pointer',
               width: '100%',
             }}
           >
-            {showPairs ? '▲ Masquer' : '▼ Voir les vérifications récentes'}
+            {showDetails ? '▲ Masquer les vérifications' : '▼ Voir les vérifications récentes'}
           </button>
 
-          {showPairs && data.recentPairs.length > 0 && (
+          {showDetails && (
             <div style={{ marginTop: '10px' }}>
               <div style={{
                 display: 'grid',
                 gridTemplateColumns: '2fr 1fr 1fr 1fr',
                 gap: '6px',
-                padding: '6px 0',
+                padding: '5px 0',
                 borderBottom: '1px solid #1e2535',
               }}>
-                {['Hash', 'Prédit', 'Réel', 'Écart'].map(h => (
+                {['Hash', 'Estimé', 'Réel', 'Écart'].map(h => (
                   <div key={h} style={{ fontSize: '10px', color: '#64748b', fontWeight: 700 }}>{h}</div>
                 ))}
               </div>
               {data.recentPairs.map((p, i) => {
-                const ok = parseInt(p.diff) < 15;
+                const pct = parseInt(p.diff);
                 return (
                   <div key={i} style={{
                     display: 'grid',
                     gridTemplateColumns: '2fr 1fr 1fr 1fr',
                     gap: '6px',
-                    padding: '7px 0',
-                    borderBottom: '1px solid #111827',
+                    padding: '6px 0',
+                    borderBottom: '1px solid #0d1421',
                     alignItems: 'center',
                   }}>
                     <div style={{ fontSize: '9px', fontFamily: 'monospace', color: '#4ade80', opacity: 0.7 }}>{p.hash}</div>
-                    <div style={{ fontSize: '12px', color: '#6b7aff', fontWeight: 600 }}>{p.predicted?.toFixed(2)}x</div>
-                    <div style={{ fontSize: '12px', color: '#e2e8f0' }}>{p.actual.toFixed(2)}x</div>
-                    <div style={{ fontSize: '11px', color: ok ? '#4ade80' : '#e07030', fontWeight: 700 }}>{p.diff}</div>
+                    <div style={{ fontSize: '11px', color: '#6b7aff' }}>{p.predicted?.toFixed(2)}x</div>
+                    <div style={{ fontSize: '11px', color: '#e2e8f0' }}>{p.actual.toFixed(2)}x</div>
+                    <div style={{ fontSize: '10px', color: pct < 15 ? '#4ade80' : pct < 30 ? '#f59e0b' : '#e07030', fontWeight: 700 }}>
+                      {p.diff}
+                    </div>
                   </div>
                 );
               })}
+              <div style={{ fontSize: '10px', color: '#3a4560', marginTop: '8px', textAlign: 'center' }}>
+                Le jeu Lucky Jet utilise une formule RNG propriétaire non publiée.
+              </div>
             </div>
           )}
         </>
