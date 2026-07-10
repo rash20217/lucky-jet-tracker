@@ -274,6 +274,7 @@ let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
 let roundCounter = 1000;
+let currentRoundHash = null; // hash Provably Fair du round en cours
 
 // ── Prediction Scheduler ──────────────────────────────────────────────────────
 const predictions = [];          // last 50 predictions
@@ -517,10 +518,11 @@ function processMessage(raw) {
 
   switch (eventType) {
     case 'startGame': {
-      currentRoundId = data.roundInfo?.id || null;
+      currentRoundId   = data.roundInfo?.id || null;
+      currentRoundHash = data.roundInfo?.provablyFair?.hash || null;
       currentRoundStart = new Date();
       currentCoeff = 1.0;
-      console.log(`[GAME] Nouveau round: ${currentRoundId}`);
+      console.log(`[GAME] Nouveau round: ${currentRoundId} hash:${currentRoundHash?.slice(0,12)}…`);
       break;
     }
     case 'changeCoefficient': {
@@ -545,10 +547,24 @@ function processMessage(raw) {
   }
 }
 
+function hashToCrashPoint(hash) {
+  if (!hash || hash.length < 13) return null;
+  try {
+    const h = parseInt(hash.slice(0, 13), 16);
+    const e = Math.pow(2, 52);
+    const houseEdge = 0.06; // 6% for lucky-jet-94
+    if (h % Math.floor(1 / houseEdge) === 0) return 1.0;
+    const result = Math.floor((1 - houseEdge) * e / (e - h) * 100) / 100;
+    return Math.max(1.0, result);
+  } catch { return null; }
+}
+
 function addRound(multiplier) {
   const round = {
     id: ++roundCounter,
     roundId: currentRoundId,
+    hashSeed: currentRoundHash,
+    pfPrediction: hashToCrashPoint(currentRoundHash),
     time: formatTime(new Date()),
     multiplier: Math.round(multiplier * 100) / 100,
     source: 'LIVE',
@@ -1335,7 +1351,46 @@ app.get('/api/ai-analysis', (req, res) => {
 });
 
 app.get('/api/luckyjet/current', (req, res) => {
-  res.json({ status: wsStatus, current: currentCoeff, roundId: currentRoundId });
+  const pfPred = hashToCrashPoint(currentRoundHash);
+  res.json({
+    status: wsStatus,
+    current: currentCoeff,
+    roundId: currentRoundId,
+    currentHash: currentRoundHash,
+    pfPrediction: pfPred,
+  });
+});
+
+app.get('/api/pf-prediction', (req, res) => {
+  // Analyse accuracy of PF formula on historical data
+  const withHash = history.filter(r => r.hashSeed && r.pfPrediction != null);
+  let exact = 0, close10 = 0, close25 = 0;
+  for (const r of withHash) {
+    const diff = Math.abs(r.pfPrediction - r.multiplier) / r.multiplier;
+    if (diff < 0.01) exact++;
+    if (diff < 0.10) close10++;
+    if (diff < 0.25) close25++;
+  }
+  const total = withHash.length;
+  const currentPred = hashToCrashPoint(currentRoundHash);
+  // Verify hash chain: SHA512(prevHash) === currentHash?
+  // (would need crypto but we check via stored data)
+  res.json({
+    currentHash: currentRoundHash,
+    currentPrediction: currentPred,
+    accuracy: total > 0 ? {
+      exact: Math.round(exact / total * 100),
+      within10pct: Math.round(close10 / total * 100),
+      within25pct: Math.round(close25 / total * 100),
+      sampleSize: total,
+    } : null,
+    recentPairs: withHash.slice(0, 10).map(r => ({
+      hash: r.hashSeed?.slice(0, 16) + '…',
+      predicted: r.pfPrediction,
+      actual: r.multiplier,
+      diff: r.pfPrediction != null ? Math.round(Math.abs(r.pfPrediction - r.multiplier) / r.multiplier * 100) + '%' : '?',
+    })),
+  });
 });
 
 app.get('/api/health', (req, res) => {
