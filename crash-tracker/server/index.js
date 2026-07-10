@@ -3,6 +3,7 @@ import cors from 'cors';
 import WebSocket from 'ws';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -274,7 +275,10 @@ let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
 let roundCounter = 1000;
-let currentRoundHash = null; // hash Provably Fair du round en cours
+let currentRoundHash   = null; // commitment hash du round en cours (SHA512 du seed)
+let currentRoundDigest = null; // seed révélé du round précédent (endGame digest)
+let lastEndHash        = null; // hash révélé pour vérifier la chaîne
+const pfPairs = [];            // { seed, hash, multiplier } pour calibration formule
 
 // ── Prediction Scheduler ──────────────────────────────────────────────────────
 const predictions = [];          // last 50 predictions
@@ -533,12 +537,24 @@ function processMessage(raw) {
     case 'stopCoefficient': {
       // Événement de crash Lucky Jet — finalValue = multiplicateur final
       const finalVal = data.finalValue ?? data.value ?? data.coefficient ?? currentCoeff ?? 1.0;
+      // Capturer le digest Provably Fair révélé à la fin du round
+      const digest = data.provablyFair?.digest || data.roundInfo?.provablyFair?.digest || null;
+      if (digest) {
+        currentRoundDigest = digest;
+        // Vérifier la chaîne: SHA512(digest) devrait == commitment hash du round suivant
+        lastEndHash = crypto.createHash('sha512').update(digest).digest('hex');
+      }
       addRound(parseFloat(finalVal));
       break;
     }
     case 'changeState': {
       // Garder pour compatibilité mais stopCoefficient est l'event principal
       const crashStates = ['crashed', 'bust', 'finish', 'finished'];
+      const digest2 = data.provablyFair?.digest || null;
+      if (digest2) {
+        currentRoundDigest = digest2;
+        lastEndHash = crypto.createHash('sha512').update(digest2).digest('hex');
+      }
       if (crashStates.includes(data.state?.toLowerCase())) {
         if (currentCoeff) addRound(currentCoeff);
       }
@@ -547,16 +563,78 @@ function processMessage(raw) {
   }
 }
 
-function hashToCrashPoint(hash) {
-  if (!hash || hash.length < 13) return null;
-  try {
-    const h = parseInt(hash.slice(0, 13), 16);
+// Formules candidates à tester — la meilleure est sélectionnée automatiquement via pfPairs
+const PF_FORMULAS = {
+  // Formule BGaming / SmartSoft standard (13 hex, 2^52, 6% house edge)
+  bgaming52: (seed) => {
+    const h = parseInt(seed.slice(0, 13), 16);
     const e = Math.pow(2, 52);
-    const houseEdge = 0.06; // 6% for lucky-jet-94
-    if (h % Math.floor(1 / houseEdge) === 0) return 1.0;
-    const result = Math.floor((1 - houseEdge) * e / (e - h) * 100) / 100;
-    return Math.max(1.0, result);
+    if (h % 15 === 0) return 1.0;
+    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
+  },
+  // Formule 32-bit (8 hex, 2^32)
+  standard32: (seed) => {
+    const h = parseInt(seed.slice(0, 8), 16);
+    const e = 0x100000000;
+    if (h % 33 === 0) return 1.0;
+    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
+  },
+  // Formule via SHA256 du digest
+  sha256_52: (seed) => {
+    const derived = crypto.createHash('sha256').update(seed).digest('hex');
+    const h = parseInt(derived.slice(0, 13), 16);
+    const e = Math.pow(2, 52);
+    if (h % 15 === 0) return 1.0;
+    return Math.max(1.0, Math.floor((1 - 0.06) * e / (e - h) * 100) / 100);
+  },
+  // Formule Aviator-like: HMAC-SHA256(serverSeed, "0")
+  hmac32: (seed) => {
+    try {
+      const hmac = crypto.createHmac('sha256', seed);
+      hmac.update('0');
+      const h = parseInt(hmac.digest('hex').slice(0, 8), 16);
+      const e = 0x100000000;
+      if (h % 33 === 0) return 1.0;
+      return Math.max(1.0, Math.floor(e / (e - h) * 100) / 100);
+    } catch { return null; }
+  },
+};
+
+let bestFormula = 'bgaming52'; // mis à jour automatiquement
+
+function selectBestFormula() {
+  if (pfPairs.length < 3) return;
+  let best = null, bestScore = -1;
+  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
+    let score = 0;
+    for (const { seed, multiplier } of pfPairs) {
+      if (!seed) continue;
+      try {
+        const pred = fn(seed);
+        if (pred == null) continue;
+        const diff = Math.abs(pred - multiplier) / multiplier;
+        if (diff < 0.10) score++;
+      } catch { /* skip */ }
+    }
+    if (score > bestScore) { bestScore = score; best = name; }
+  }
+  if (best) bestFormula = best;
+}
+
+function hashToCrashPoint(seed) {
+  if (!seed || seed.length < 8) return null;
+  try {
+    return PF_FORMULAS[bestFormula]?.(seed) ?? null;
   } catch { return null; }
+}
+
+function hashToCrashPointAll(seed) {
+  if (!seed || seed.length < 8) return {};
+  const results = {};
+  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
+    try { results[name] = fn(seed); } catch { results[name] = null; }
+  }
+  return results;
 }
 
 function addRound(multiplier) {
@@ -564,17 +642,25 @@ function addRound(multiplier) {
     id: ++roundCounter,
     roundId: currentRoundId,
     hashSeed: currentRoundHash,
-    pfPrediction: hashToCrashPoint(currentRoundHash),
+    pfDigest: currentRoundDigest,
+    pfPrediction: hashToCrashPoint(currentRoundDigest || currentRoundHash),
     time: formatTime(new Date()),
     multiplier: Math.round(multiplier * 100) / 100,
     source: 'LIVE',
     timestamp: Date.now(),
   };
+  // Accumuler les paires (seed, multiplier) pour calibrer la meilleure formule
+  if (currentRoundDigest || currentRoundHash) {
+    pfPairs.unshift({ seed: currentRoundDigest || currentRoundHash, multiplier: round.multiplier });
+    if (pfPairs.length > 50) pfPairs.pop();
+    if (pfPairs.length >= 3) selectBestFormula();
+  }
   history.unshift(round);
   if (history.length > MAX_HISTORY) history.pop();
-  currentCoeff = null;
-  currentRoundId = null;
-  console.log(`[ROUND] #${round.id} — ${round.multiplier}x`);
+  currentCoeff  = null;
+  currentRoundId     = null;
+  currentRoundDigest = null;
+  console.log(`[ROUND] #${round.id} — ${round.multiplier}x formula:${bestFormula}`);
   if (IS_PRIMARY) pushRoundToRemote(round);
   validatePredictions(round);
   // Check if we should send an AI signal notification
@@ -1362,30 +1448,65 @@ app.get('/api/luckyjet/current', (req, res) => {
 });
 
 app.get('/api/pf-prediction', (req, res) => {
-  // Analyse accuracy of PF formula on historical data
-  const withHash = history.filter(r => r.hashSeed && r.pfPrediction != null);
+  // Prédiction du round courant (seed révélé → hash suivant)
+  const predSeed = currentRoundDigest
+    ? crypto.createHash('sha512').update(currentRoundDigest).digest('hex') // next seed via chain
+    : currentRoundHash;
+  const currentPred = hashToCrashPoint(predSeed || currentRoundHash);
+
+  // Toutes les formules sur le seed courant
+  const allFormulas = predSeed ? hashToCrashPointAll(predSeed) : {};
+
+  // Vérification chaîne hash: SHA512(lastEndHash) devrait == currentRoundHash
+  let chainValid = null;
+  if (lastEndHash && currentRoundHash) {
+    chainValid = lastEndHash === currentRoundHash;
+  }
+
+  // Accuracy sur les paires collectées
   let exact = 0, close10 = 0, close25 = 0;
-  for (const r of withHash) {
+  const withPred = history.filter(r => r.pfPrediction != null);
+  for (const r of withPred) {
     const diff = Math.abs(r.pfPrediction - r.multiplier) / r.multiplier;
     if (diff < 0.01) exact++;
     if (diff < 0.10) close10++;
     if (diff < 0.25) close25++;
   }
-  const total = withHash.length;
-  const currentPred = hashToCrashPoint(currentRoundHash);
-  // Verify hash chain: SHA512(prevHash) === currentHash?
-  // (would need crypto but we check via stored data)
+  const total = withPred.length;
+
+  // Calibration — scores par formule
+  const formulaScores = {};
+  for (const [name, fn] of Object.entries(PF_FORMULAS)) {
+    let score = 0, tested = 0;
+    for (const { seed, multiplier } of pfPairs) {
+      if (!seed) continue;
+      try {
+        const p = fn(seed);
+        if (p == null) continue;
+        tested++;
+        const diff = Math.abs(p - multiplier) / multiplier;
+        if (diff < 0.10) score++;
+      } catch { /* skip */ }
+    }
+    formulaScores[name] = tested > 0 ? Math.round(score / tested * 100) : 0;
+  }
+
   res.json({
     currentHash: currentRoundHash,
     currentPrediction: currentPred,
+    allFormulas,
+    bestFormula,
+    chainValid,
+    hasDigest: !!currentRoundDigest,
     accuracy: total > 0 ? {
       exact: Math.round(exact / total * 100),
       within10pct: Math.round(close10 / total * 100),
       within25pct: Math.round(close25 / total * 100),
       sampleSize: total,
     } : null,
-    recentPairs: withHash.slice(0, 10).map(r => ({
-      hash: r.hashSeed?.slice(0, 16) + '…',
+    formulaScores,
+    recentPairs: withPred.slice(0, 10).map(r => ({
+      hash: (r.pfDigest || r.hashSeed)?.slice(0, 16) + '…',
       predicted: r.pfPrediction,
       actual: r.multiplier,
       diff: r.pfPrediction != null ? Math.round(Math.abs(r.pfPrediction - r.multiplier) / r.multiplier * 100) + '%' : '?',
