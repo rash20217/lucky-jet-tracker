@@ -1,6 +1,8 @@
 export interface Round {
   id: number;
   roundId?: string;
+  hashSeed?: string;
+  pfPrediction?: number;
   time: string;
   multiplier: number;
   source: 'LIVE' | 'HISTORIQUE';
