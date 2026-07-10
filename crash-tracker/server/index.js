@@ -547,14 +547,24 @@ function processMessage(raw) {
       addRound(parseFloat(finalVal));
       break;
     }
+    case 'endGame': {
+      // endGame révèle le digest du round qui vient de se terminer
+      const eDigest = data.provablyFair?.digest || null;
+      const eHash   = data.provablyFair?.hash   || null;
+      if (eDigest) {
+        currentRoundDigest = eDigest;
+        // Si digest !== hash → digest est le vrai seed, SHA512(seed) == hash
+        // Si digest == hash → hash IS the seed (pas de séparation)
+        const digestIsHash = eHash && eDigest === eHash;
+        const sha512ofDigest = crypto.createHash('sha512').update(eDigest).digest('hex');
+        lastEndHash = sha512ofDigest;
+        console.log(`[PF] endGame digest:${eDigest.slice(0,20)}… hash:${eHash?.slice(0,20)}… sameAsHash:${digestIsHash} SHA512(digest)==hash:${sha512ofDigest===eHash}`);
+      }
+      break;
+    }
     case 'changeState': {
       // Garder pour compatibilité mais stopCoefficient est l'event principal
       const crashStates = ['crashed', 'bust', 'finish', 'finished'];
-      const digest2 = data.provablyFair?.digest || null;
-      if (digest2) {
-        currentRoundDigest = digest2;
-        lastEndHash = crypto.createHash('sha512').update(digest2).digest('hex');
-      }
       if (crashStates.includes(data.state?.toLowerCase())) {
         if (currentCoeff) addRound(currentCoeff);
       }
