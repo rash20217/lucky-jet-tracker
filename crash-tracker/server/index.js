@@ -275,10 +275,30 @@ let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
 let roundCounter = 1000;
-let currentRoundHash   = null; // commitment hash du round en cours (SHA512 du seed)
-let currentRoundDigest = null; // seed révélé du round précédent (endGame digest)
-let lastEndHash        = null; // hash révélé pour vérifier la chaîne
-const pfPairs = [];            // { seed, hash, multiplier } pour calibration formule
+let currentRoundHash   = null;
+let currentRoundDigest = null;
+let lastEndHash        = null;
+const pfPairs = [];
+
+// ── PF Pairs persistence ───────────────────────────────────────────────────────
+const PF_PAIRS_FILE = path.join(__dirname, 'pf-pairs.json');
+
+function loadPfPairs() {
+  try {
+    if (fs.existsSync(PF_PAIRS_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(PF_PAIRS_FILE, 'utf8'));
+      if (Array.isArray(saved)) {
+        pfPairs.push(...saved.slice(0, 200));
+        console.log(`[PF] ${pfPairs.length} paires chargées depuis le disque`);
+      }
+    }
+  } catch (e) { console.error('[PF] Erreur chargement paires:', e.message); }
+}
+
+function savePfPairs() {
+  try { fs.writeFileSync(PF_PAIRS_FILE, JSON.stringify(pfPairs.slice(0, 200))); }
+  catch (e) { console.error('[PF] Erreur sauvegarde paires:', e.message); }
+}
 
 // ── Prediction Scheduler ──────────────────────────────────────────────────────
 const predictions = [];          // last 50 predictions
@@ -657,21 +677,32 @@ function calibratePF() {
 
   if (globalBest.score >= 0) {
     const prev = pfLearn.bestWindow;
-    pfLearn.bestWindow = globalBest;
-    pfLearn.lastCalibrated = Date.now();
-    console.log(`[PF-LEARN] Best window: offset=${globalBest.offset} len=${globalBest.len} edge=${globalBest.edge} transform=${TRANSFORMS[globalBest.ti].name} score=${Math.round(globalBest.score*100)}% (${globalBest.tested} rounds)`);
-    // Recalculer rétrospectivement les prédictions stockées en historique
-    if (!prev || prev.offset !== globalBest.offset || prev.ti !== globalBest.ti || prev.edge !== globalBest.edge) {
-      let recalc = 0;
-      for (const r of history) {
-        const seed = r.pfDigest || r.hashSeed;
-        if (seed) {
-          const newPred = predictWithConfig(seed, globalBest.offset, globalBest.len, globalBest.edge, globalBest.ti);
-          if (newPred != null) { r.pfPrediction = newPred; recalc++; }
+    // Stabilité: ne changer de fenêtre que si le nouveau score est significativement meilleur
+    // (ou si c'est la première calibration) pour éviter l'oscillation sur petits échantillons
+    const minImprovement = pairs.length < 20 ? 0.10 : 0.03;
+    const shouldSwitch = !prev
+      || (globalBest.score - prev.score) >= minImprovement
+      || (pairs.length >= 50 && globalBest.score > prev.score);
+
+    if (shouldSwitch) {
+      pfLearn.bestWindow = globalBest;
+      pfLearn.lastCalibrated = Date.now();
+      console.log(`[PF-LEARN] Best window: offset=${globalBest.offset} len=${globalBest.len} edge=${globalBest.edge} transform=${TRANSFORMS[globalBest.ti].name} score=${Math.round(globalBest.score*100)}% (${globalBest.tested} rounds)`);
+      // Rétro-calibration uniquement si la fenêtre a changé
+      if (!prev || prev.offset !== globalBest.offset || prev.ti !== globalBest.ti || prev.edge !== globalBest.edge) {
+        let recalc = 0;
+        for (const r of history) {
+          const seed = r.pfDigest || r.hashSeed;
+          if (seed) {
+            const newPred = predictWithConfig(seed, globalBest.offset, globalBest.len, globalBest.edge, globalBest.ti);
+            if (newPred != null) { r.pfPrediction = newPred; recalc++; }
+          }
         }
+        if (recalc > 0) console.log(`[PF-LEARN] Rétro-calibration: ${recalc} rounds mis à jour`);
       }
-      if (recalc > 0) console.log(`[PF-LEARN] Rétro-calibration: ${recalc} rounds mis à jour`);
     }
+    // Sauvegarder les paires sur disque toutes les 10 calibrations
+    if (pairs.length % 10 === 0 || pairs.length <= 10) savePfPairs();
   }
 
   // Modèle de zones basé sur le segment le plus discriminant
@@ -1695,6 +1726,8 @@ app.get(/^\/(?!api).*/, (req, res) => {
 const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[API] Serveur Express lancé sur le port ${PORT}`);
+  loadPfPairs();
+  if (pfPairs.length >= 5) setImmediate(calibratePF);
   if (TG_ENABLED) {
     loadSubscribers();
     console.log(`[TG] Bot Telegram activé — ${subscribers.size} abonné(s)`);
