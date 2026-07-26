@@ -656,9 +656,22 @@ function calibratePF() {
   }
 
   if (globalBest.score >= 0) {
+    const prev = pfLearn.bestWindow;
     pfLearn.bestWindow = globalBest;
     pfLearn.lastCalibrated = Date.now();
     console.log(`[PF-LEARN] Best window: offset=${globalBest.offset} len=${globalBest.len} edge=${globalBest.edge} transform=${TRANSFORMS[globalBest.ti].name} score=${Math.round(globalBest.score*100)}% (${globalBest.tested} rounds)`);
+    // Recalculer rétrospectivement les prédictions stockées en historique
+    if (!prev || prev.offset !== globalBest.offset || prev.ti !== globalBest.ti || prev.edge !== globalBest.edge) {
+      let recalc = 0;
+      for (const r of history) {
+        const seed = r.pfDigest || r.hashSeed;
+        if (seed) {
+          const newPred = predictWithConfig(seed, globalBest.offset, globalBest.len, globalBest.edge, globalBest.ti);
+          if (newPred != null) { r.pfPrediction = newPred; recalc++; }
+        }
+      }
+      if (recalc > 0) console.log(`[PF-LEARN] Rétro-calibration: ${recalc} rounds mis à jour`);
+    }
   }
 
   // Modèle de zones basé sur le segment le plus discriminant
