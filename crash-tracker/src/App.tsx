@@ -10,6 +10,7 @@ import DeepAnalysis from './components/DeepAnalysis';
 import PredictorPanel from './components/PredictorPanel';
 import AIPanel from './components/AIPanel';
 import PFPredictor from './components/PFPredictor';
+import AdaptivePredictor from './components/AdaptivePredictor';
 import './index.css';
 
 type WsStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
@@ -201,6 +202,7 @@ export default function App() {
       {rounds.length > 0 && (
         <>
           <PFPredictor />
+          <AdaptivePredictor rounds={rounds} />
           <PredictorPanel />
           <AIPanel />
           <PredictionCard prediction={prediction} onRefresh={fetchRounds} />
