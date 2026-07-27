@@ -275,9 +275,12 @@ let ws = null;
 let reconnectTimer = null;
 let pingTimer = null;
 let roundCounter = 1000;
-let currentRoundHash   = null;
-let currentRoundDigest = null;
-let lastEndHash        = null;
+let currentRoundHash        = null;
+let currentRoundDigest      = null;
+let currentRoundSalt        = null;
+let currentRoundCheckString = null;
+let currentRoundVerifiedMult = null;
+let lastEndHash             = null;
 const pfPairs = [];
 
 // ── PF Pairs persistence ───────────────────────────────────────────────────────
@@ -517,6 +520,14 @@ async function authenticate() {
 
 // ── Traitement des messages WebSocket ─────────────────────────────────────────
 
+// Fichier de dump brut pour analyse des champs WebSocket
+const RAW_DUMP_FILE = path.join(__dirname, 'ws-raw-dump.json');
+const rawDumpEvents = [];
+let rawDumpCount = 0;
+function saveRawDump() {
+  try { fs.writeFileSync(RAW_DUMP_FILE, JSON.stringify(rawDumpEvents, null, 2)); } catch {}
+}
+
 function processMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
@@ -535,6 +546,36 @@ function processMessage(raw) {
 
   const eventType = data.eventType;
 
+  // ── DUMP BRUT complet pour analyse ──────────────────────────────────────────
+  // Capturer startGame et endGame en intégralité (structure complète sans troncature)
+  if (eventType === 'startGame' || eventType === 'endGame' || eventType === 'stopCoefficient') {
+    rawDumpCount++;
+    const entry = {
+      n: rawDumpCount,
+      ts: new Date().toISOString(),
+      eventType,
+      // Structure complète du message WebSocket brut
+      full_push: push,
+      // Raccourcis clés
+      pub_channel: push.channel,
+      pub_offset: push.pub?.offset,
+      pub_tags: push.pub?.tags,
+      data_keys: Object.keys(data),
+      roundInfo_keys: data.roundInfo ? Object.keys(data.roundInfo) : null,
+      pf_startGame: data.roundInfo?.provablyFair || null,
+      pf_endGame: data.provablyFair || null,
+      roundInfo_full: data.roundInfo || null,
+    };
+    rawDumpEvents.push(entry);
+    if (rawDumpEvents.length > 60) rawDumpEvents.shift();
+    if (rawDumpCount % 3 === 0) saveRawDump();
+    // Log complet dans la console pour les 3 premiers rounds
+    if (rawDumpCount <= 6) {
+      console.log(`[RAW-DUMP] #${rawDumpCount} ${eventType} FULL:`, JSON.stringify(entry, null, 2).slice(0, 2000));
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   // Log tous les événements importants (sauf changeCoefficient qui est trop fréquent)
   if (eventType && eventType !== 'changeCoefficient') {
     console.log(`[EVENT] ${eventType} — ${JSON.stringify(data).slice(0, 200)}`);
@@ -542,9 +583,12 @@ function processMessage(raw) {
 
   switch (eventType) {
     case 'startGame': {
-      currentRoundId   = data.roundInfo?.id || null;
-      currentRoundHash = data.roundInfo?.provablyFair?.hash || null;
-      currentRoundStart = new Date();
+      currentRoundId           = data.roundInfo?.id || null;
+      currentRoundHash         = data.roundInfo?.provablyFair?.hash || null;
+      currentRoundStart        = new Date();
+      currentRoundSalt         = null;
+      currentRoundCheckString  = null;
+      currentRoundVerifiedMult = null;
       currentCoeff = 1.0;
       console.log(`[GAME] Nouveau round: ${currentRoundId} hash:${currentRoundHash?.slice(0,12)}…`);
       break;
@@ -568,18 +612,34 @@ function processMessage(raw) {
       break;
     }
     case 'endGame': {
-      // endGame révèle le digest du round qui vient de se terminer
-      const eDigest = data.provablyFair?.digest || null;
-      const eHash   = data.provablyFair?.hash   || null;
-      if (eDigest) {
-        currentRoundDigest = eDigest;
-        // Si digest !== hash → digest est le vrai seed, SHA512(seed) == hash
-        // Si digest == hash → hash IS the seed (pas de séparation)
-        const digestIsHash = eHash && eDigest === eHash;
-        const sha512ofDigest = crypto.createHash('sha512').update(eDigest).digest('hex');
-        lastEndHash = sha512ofDigest;
-        console.log(`[PF] endGame digest:${eDigest.slice(0,20)}… hash:${eHash?.slice(0,20)}… sameAsHash:${digestIsHash} SHA512(digest)==hash:${sha512ofDigest===eHash}`);
+      // endGame révèle : hash, digest, salt, checkString
+      // Formule prouvée : hash = SHA512(roundId + "[" + multiplier + "]" + salt)
+      const pf = data.provablyFair || {};
+      const eHash        = pf.hash   || null;
+      const eDigest      = pf.digest || null;
+      const eSalt        = pf.salt   || null;
+      const eCheckString = pf.checkString || null;
+
+      if (eDigest) currentRoundDigest = eDigest;
+
+      // Extraire le multiplicateur exact depuis le checkString
+      // Format: "roundId+[mult]+salt"
+      if (eCheckString) {
+        currentRoundCheckString = eCheckString;
+        currentRoundSalt = eSalt;
+        const multMatch = eCheckString.match(/\[([^\]]+)\]/);
+        if (multMatch) {
+          const parsedMult = parseFloat(multMatch[1]);
+          if (!isNaN(parsedMult)) currentRoundVerifiedMult = parsedMult;
+        }
+        // Vérification d'intégrité : SHA512(checkString) doit == hash
+        const computed = crypto.createHash('sha512').update(eCheckString).digest('hex');
+        const verified = computed === eHash;
+        console.log(`[PF] endGame verified:${verified} mult:${currentRoundVerifiedMult}x salt:${eSalt?.slice(0,8)}… checkStr:${eCheckString?.slice(0,50)}…`);
+        if (!verified) console.warn('[PF] ⚠️  Intégrité ÉCHOUÉE — hash ne correspond pas au checkString !');
       }
+
+      lastEndHash = eHash ? crypto.createHash('sha512').update(eHash).digest('hex') : null;
       break;
     }
     case 'changeState': {
@@ -796,37 +856,55 @@ function getPFLearnSummary() {
 }
 
 function addRound(multiplier) {
+  // Utiliser le multiplicateur vérifié depuis checkString s'il est disponible
+  // (plus fiable que stopCoefficient.finalValue)
+  const verifiedMult = currentRoundVerifiedMult ?? Math.round(multiplier * 100) / 100;
+
   const round = {
     id: ++roundCounter,
     roundId: currentRoundId,
     hashSeed: currentRoundHash,
     pfDigest: currentRoundDigest,
+    pfSalt: currentRoundSalt,
+    pfCheckString: currentRoundCheckString,
+    pfVerified: !!currentRoundCheckString,
     pfPrediction: hashToCrashPoint(currentRoundDigest || currentRoundHash),
     time: formatTime(new Date()),
-    multiplier: Math.round(multiplier * 100) / 100,
+    multiplier: verifiedMult,
     source: 'LIVE',
     timestamp: Date.now(),
   };
-  // Accumuler les paires (hash, multiplier) pour le moteur d'apprentissage
+
+  // Accumuler les paires enrichies pour le moteur d'apprentissage
   const seed = currentRoundDigest || currentRoundHash;
   if (seed) {
-    pfPairs.unshift({ seed, multiplier: round.multiplier });
+    pfPairs.unshift({
+      seed,
+      multiplier: verifiedMult,
+      roundId: currentRoundId,
+      salt: currentRoundSalt,
+      checkString: currentRoundCheckString,
+      verified: !!currentRoundCheckString,
+      ts: Date.now(),
+    });
     if (pfPairs.length > 200) pfPairs.pop();
-    // Calibration: chaque round, tous les 5 rounds après les 5 premiers
     if (pfPairs.length >= 5 && (pfPairs.length <= 20 || pfPairs.length % 5 === 0)) {
       setImmediate(calibratePF);
     }
   }
+
   history.unshift(round);
   if (history.length > MAX_HISTORY) history.pop();
-  currentCoeff       = null;
-  currentRoundId     = null;
-  currentRoundDigest = null;
+  currentCoeff             = null;
+  currentRoundId           = null;
+  currentRoundDigest       = null;
+  currentRoundSalt         = null;
+  currentRoundCheckString  = null;
+  currentRoundVerifiedMult = null;
   const learned = pfLearn.bestWindow;
-  console.log(`[ROUND] #${round.id} — ${round.multiplier}x | PF pairs:${pfPairs.length} bestScore:${learned ? Math.round(learned.score*100)+'%' : 'n/a'}`);
+  console.log(`[ROUND] #${round.id} — ${verifiedMult}x${round.pfVerified ? ' ✓' : ''} | PF pairs:${pfPairs.length} bestScore:${learned ? Math.round(learned.score*100)+'%' : 'n/a'}`);
   if (IS_PRIMARY) pushRoundToRemote(round);
   validatePredictions(round);
-  // Check if we should send an AI signal notification
   if (history.length >= 10) checkAndSendAISignal();
 }
 
